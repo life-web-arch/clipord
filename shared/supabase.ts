@@ -91,8 +91,7 @@ export async function getSpacesWithKeys(accountId: string): Promise
     created_at:          string
     encrypted_space_key: string
     iv:                  string
-  }>
-> {
+  }>> {
   const { data, error } = await supabase
     .from('space_members')
     .select(`

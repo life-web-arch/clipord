@@ -23,7 +23,6 @@ export function LockScreen({ onUnlocked }: Props) {
       const {
         deriveKeyFromPassphrase, base64ToBuf, generateSalt, bufToBase64, retrieveTOTPSecret
       } = await import('@shared/crypto')
-      // Use the robust path alias '@/' to prevent build failures
       const { bridgeAccountToExtension } = await import('@/main')
       
       const saltKey = 'clipord_salt_' + activeAccount.id
@@ -35,7 +34,7 @@ export function LockScreen({ onUnlocked }: Props) {
       const salt       = base64ToBuf(saltStr)
       const accountKey = await deriveKeyFromPassphrase(activeAccount.id, salt)
       
-      const secret = localStorage.getItem('clipord_totp_' + activeAccount.id) || await retrieveTOTPSecret(activeAccount.id, accountKey)
+      const secret = await retrieveTOTPSecret(activeAccount.id, accountKey)
       if (secret) {
         bridgeAccountToExtension(activeAccount.id, activeAccount.email, secret)
       }
@@ -46,7 +45,6 @@ export function LockScreen({ onUnlocked }: Props) {
       onUnlocked()
     } catch (error) {
         console.error("Verification process failed:", error)
-        // Optionally, show an error to the user
     }
   }
 

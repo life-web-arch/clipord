@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { TOTP, Secret } from 'otpauth' // <-- CORRECT, NAMED IMPORT
+import { TOTP, Secret } from 'otpauth'
 import QRCode from 'qrcode'
 import { Spinner } from '../ui/Spinner'
 
@@ -10,22 +10,21 @@ interface Props {
 }
 
 export function TOTPSetup({ email, accountId, onComplete }: Props) {
-  const [secret, setSecret]   = useState('')
+  const[secret, setSecret]   = useState('')
   const [qrUrl, setQrUrl]     = useState('')
-  const [code, setCode]       = useState('')
+  const[code, setCode]       = useState('')
   const [error, setError]     = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
-  const [copied, setCopied]   = useState(false)
+  const[copied, setCopied]   = useState(false)
 
   useEffect(() => {
-    // Use the direct imports now
     const totp = new TOTP({
       issuer:    'Clipord',
       label:     email,
       algorithm: 'SHA1',
       digits:    6,
       period:    30,
-      secret:    Secret.generate(32), // <-- CORRECT USAGE
+      secret:    new Secret({ size: 20 }), // Fix: use constructor for random 160-bit secret
     })
     const secretStr = totp.secret.base32
     setSecret(secretStr)
@@ -41,13 +40,13 @@ export function TOTPSetup({ email, accountId, onComplete }: Props) {
       algorithm: 'SHA1',
       digits:    6,
       period:    30,
-      secret:    Secret.fromBase32(secret), // <-- CORRECT USAGE
+      secret:    Secret.fromBase32(secret),
     })
     const delta = totp.validate({ token: code, window: 1 })
     if (delta === null) {
       setError('Invalid code. Make sure your authenticator app time is correct.')
     } else {
-      localStorage.setItem(`clipord_totp_${accountId}`, secret)
+      // NOTE: Plaintext storage intentionally removed here for security
       onComplete(secret)
     }
     setLoading(false)

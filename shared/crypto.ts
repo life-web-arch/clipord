@@ -12,11 +12,6 @@ const HMAC_HASH         = 'SHA-256'
 
 // ---------- Key derivation ----------
 
-/**
- * Derive an AES-GCM key from a user-supplied passphrase + stored salt.
- * The salt must be stored on the device and synced (via Supabase user metadata)
- * so the same key is reproduced on every device.
- */
 export async function deriveKeyFromPassphrase(
   passphrase: string,
   salt: Uint8Array
@@ -46,8 +41,7 @@ export async function deriveHMACKey(
     { name: 'PBKDF2', salt, iterations: PBKDF2_ITERATIONS, hash: PBKDF2_HASH },
     keyMaterial,
     { name: HMAC_ALGO, hash: HMAC_HASH },
-    false,
-    ['sign', 'verify']
+    false,['sign', 'verify']
   )
 }
 
@@ -186,23 +180,30 @@ export async function storeTOTPSecret(
 ): Promise<void> {
   const { ciphertext, iv } = await encryptText(secret, accountKey)
   const integrity = await signData(ciphertext, accountKey)
-  localStorage.setItem(
-    'clipord_totp_enc_' + accountId,
-    JSON.stringify({ ciphertext, iv, integrity, v: 1 })
-  )
-  // DO NOT delete the plaintext key here — extension relies on it.
-  // Instead keep both: encrypted version for PWA, plaintext for extension bridge.
-  // Extension bridge is in browser.storage.local, not localStorage.
+  if (typeof localStorage !== 'undefined') {
+    localStorage.setItem(
+      'clipord_totp_enc_' + accountId,
+      JSON.stringify({ ciphertext, iv, integrity, v: 1 })
+    )
+  }
 }
 
 export async function retrieveTOTPSecret(
   accountId: string,
   accountKey: CryptoKey
 ): Promise<string | null> {
+  if (typeof localStorage === 'undefined') return null;
+
   const raw = localStorage.getItem('clipord_totp_enc_' + accountId)
   if (!raw) {
-    // Fallback: unencrypted legacy key
-    return localStorage.getItem('clipord_totp_' + accountId)
+    // Fallback: unencrypted legacy key (Auto-Migrate)
+    const plaintext = localStorage.getItem('clipord_totp_' + accountId)
+    if (plaintext) {
+      await storeTOTPSecret(accountId, plaintext, accountKey)
+      localStorage.removeItem('clipord_totp_' + accountId)
+      return plaintext
+    }
+    return null
   }
   try {
     const { ciphertext, iv, integrity } = JSON.parse(raw) as {
@@ -220,18 +221,11 @@ export async function retrieveTOTPSecret(
 }
 
 // ---------- Salt sync helpers ----------
-// Salt must be the same on every device to produce the same AES key.
-// We store it in Supabase user metadata so it's available everywhere.
 
 export function getSaltKey(accountId: string): string {
   return 'clipord_salt_' + accountId
 }
 
-/**
- * Get or create the salt for an account.
- * On first device: generate random salt, save locally AND to Supabase metadata.
- * On subsequent devices: load from Supabase metadata, save locally.
- */
 export async function getOrCreateSalt(
   accountId: string,
   fetchFromServer: () => Promise<string | null>,
@@ -240,20 +234,22 @@ export async function getOrCreateSalt(
   const key = getSaltKey(accountId)
 
   // 1. Check local storage first
-  const localSalt = localStorage.getItem(key)
-  if (localSalt) return base64ToBuf(localSalt)
+  if (typeof localStorage !== 'undefined') {
+    const localSalt = localStorage.getItem(key)
+    if (localSalt) return base64ToBuf(localSalt)
+  }
 
   // 2. Fetch from server (Supabase user metadata)
   const serverSalt = await fetchFromServer()
   if (serverSalt) {
-    localStorage.setItem(key, serverSalt)
+    if (typeof localStorage !== 'undefined') localStorage.setItem(key, serverSalt)
     return base64ToBuf(serverSalt)
   }
 
   // 3. First time ever — generate and save everywhere
   const salt = generateSalt()
   const saltB64 = bufToBase64(salt)
-  localStorage.setItem(key, saltB64)
+  if (typeof localStorage !== 'undefined') localStorage.setItem(key, saltB64)
   await saveToServer(saltB64)
   return salt
 }

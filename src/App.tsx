@@ -35,7 +35,7 @@ type AuthStep =
   | 'forgot'
   | 'locked'
   | 'app'
-  | 'error' // Added error state
+  | 'error'
 
 function IntentHandler() {
   const location    = useLocation()
@@ -62,9 +62,59 @@ function IntentHandler() {
 }
 
 function InviteAccept() {
-    // ... (This component is correct, no changes needed)
+  const { token } = useParams<{ token: string }>()
+  const navigate = useNavigate()
+  const clipCtx = useClipsSafe()
+  const { activeAccount, isVerified } = useAuth()
+
+  useEffect(() => {
+    if (!token) return
+    const checkInvite = async () => {
+      if (!isVerified || !activeAccount) return
+      
+      const { data, error } = await supabase
+        .from('space_invites')
+        .select('*, spaces(name)')
+        .eq('token', token)
+        .single()
+        
+      if (error || !data) {
+        alert('Invalid or expired invite')
+        navigate('/', { replace: true })
+        return
+      }
+
+      const { error: joinError } = await supabase
+        .from('space_members')
+        .insert({
+          space_id: data.space_id,
+          account_id: activeAccount.id,
+          role: 'member'
+        })
+        
+      if (!joinError) {
+        await supabase.from('space_invites').update({ used_at: new Date().toISOString() }).eq('id', data.id)
+        if (clipCtx?.refreshClips) await clipCtx.refreshClips()
+        alert(`Joined ${data.spaces?.name}!`)
+      } else {
+        alert(joinError.message)
+      }
+      navigate('/', { replace: true })
+    }
+    checkInvite()
+  }, [token, activeAccount, isVerified, clipCtx, navigate])
+
+  return (
+    <div className="min-h-screen bg-dark-0 flex items-center justify-center">
+      <div className="text-center">
+        <Spinner size="lg" />
+        <p className="text-white/40 text-sm mt-4">Processing invite...</p>
+      </div>
+    </div>
+  )
 }
 
+import { useParams } from 'react-router-dom' // Ensure useParams is present
 
 function AppInner() {
   const {
@@ -77,12 +127,12 @@ function AppInner() {
   const [authError, setAuthError]         = useState<string | null>(null)
   const [pendingEmail, setPendingEmail]   = useState('')
   const [pendingUserId, setPendingUserId] = useState('')
-  const [cryptoKeyRef, setCryptoKeyRef]   = useState<CryptoKey | null>(null)
+  const[cryptoKeyRef, setCryptoKeyRef]   = useState<CryptoKey | null>(null)
   const location                          = useLocation()
 
   useEffect(() => {
     if (isLocked && step === 'app') setStep('locked')
-  }, [isLocked, step])
+  },[isLocked, step])
 
   useEffect(() => {
     if (accounts.length === 0) setStep('switcher')
@@ -97,7 +147,7 @@ function AppInner() {
       )
       const accountKey = await deriveKeyFromPassphrase(account.id, salt)
       
-      const secret = localStorage.getItem('clipord_totp_' + account.id) || await retrieveTOTPSecret(account.id, accountKey)
+      const secret = await retrieveTOTPSecret(account.id, accountKey)
       if (secret) {
         bridgeAccountToExtension(account.id, account.email, secret)
       }
@@ -116,7 +166,7 @@ function AppInner() {
         console.error("FATAL: unlockAccount failed:", error)
         setAuthError("A critical error occurred during account decryption. Please try again.")
         setStep('error')
-        throw error // Re-throw to stop subsequent execution
+        throw error 
     }
   }
 
@@ -126,7 +176,6 @@ function AppInner() {
       !!localStorage.getItem('clipord_totp_enc_' + account.id) ||
       !!localStorage.getItem('clipord_totp_' + account.id)
     if (!hasTOTP) {
-      // This is an inconsistent state, likely from a partial signup. Re-route to start.
       setStep('add-account-email');
       return
     }
@@ -150,26 +199,20 @@ function AppInner() {
     setStep('totp-setup')
   }
   
-  // THIS IS THE CRITICAL FIX
   const handleTOTPSetupComplete = async (secret: string) => {
     try {
         const account: Account = {
             id: pendingUserId, email: pendingEmail, createdAt: new Date().toISOString(),
         }
         
-        // This must happen BEFORE unlocking
         addAccount(account)
         await setActiveAccount(account)
-        
-        // **AWAIT** the unlock process to complete before changing step
         const accountKey = await unlockAccount(account)
         
-        // Now it's safe to store secrets and finalize
+        // Exclusively save via secure Encrypted Vault wrapper 
         await storeTOTPSecret(account.id, secret, accountKey)
-        localStorage.setItem('clipord_totp_' + account.id, secret)
         bridgeAccountToExtension(account.id, account.email, secret)
         
-        // Only transition to the app AFTER everything above is successful
         setStep('app')
     } catch (error) {
         console.error("Failed during TOTP setup finalization:", error)
@@ -207,7 +250,6 @@ function AppInner() {
     )
   }
   
-  // Render loading indicator if accounts are still being loaded
   if (useAuth().isLoading) {
       return (
         <div className="min-h-screen bg-dark-0 flex items-center justify-center">
@@ -233,7 +275,6 @@ function AppInner() {
     )
   }
 
-  // The rest of the component remains the same...
   if (step === 'switcher') {
     return (
       <AccountSwitcher

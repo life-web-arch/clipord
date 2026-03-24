@@ -1,7 +1,7 @@
 import { useState } from 'react'
-import { TOTP, Secret } from 'otpauth' // <-- CORRECT, NAMED IMPORT
+import { TOTP, Secret } from 'otpauth'
 import { sendPasswordResetEmail } from '@shared/supabase'
-import { retrieveTOTPSecret } from '@shared/crypto'
+import { retrieveTOTPSecret, deriveKeyFromPassphrase, base64ToBuf } from '@shared/crypto'
 import { Spinner } from '../ui/Spinner'
 
 interface Props {
@@ -13,28 +13,33 @@ interface Props {
 }
 
 export function ForgotAccess({ accountId, email, cryptoKey, onRecovered, onBack }: Props) {
-  const [mode, setMode]           = useState<'choose' | 'totp' | 'email'>('choose')
+  const[mode, setMode]           = useState<'choose' | 'totp' | 'email'>('choose')
   const [code, setCode]           = useState('')
   const [loading, setLoading]     = useState(false)
   const [error, setError]         = useState<string | null>(null)
-  const [emailSent, setEmailSent] = useState(false)
+  const[emailSent, setEmailSent] = useState(false)
 
   const handleTOTP = async () => {
     setLoading(true)
     setError(null)
     try {
       let secret: string | null = null
-      if (cryptoKey) {
-        secret = await retrieveTOTPSecret(accountId, cryptoKey)
-      } else {
-        secret = localStorage.getItem(`clipord_totp_${accountId}`)
+      let key = cryptoKey
+      if (!key) {
+        const saltStr = localStorage.getItem('clipord_salt_' + accountId)
+        if (saltStr) {
+           key = await deriveKeyFromPassphrase(accountId, base64ToBuf(saltStr))
+        }
+      }
+      if (key) {
+        secret = await retrieveTOTPSecret(accountId, key)
       }
       if (!secret) { setError('No authenticator configured for this account'); setLoading(false); return }
 
       const totp = new TOTP({
         issuer: 'Clipord', label: email, algorithm: 'SHA1',
         digits: 6, period: 30,
-        secret: Secret.fromBase32(secret), // <-- CORRECT USAGE
+        secret: Secret.fromBase32(secret),
       })
       const delta = totp.validate({ token: code, window: 1 })
       if (delta === null) {

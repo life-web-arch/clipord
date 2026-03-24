@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react'
 import { Routes, Route } from 'react-router-dom'
-import { BrowserRouter } from 'react-router-dom'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import { ClipProvider } from './context/ClipContext'
 import { AccountSwitcher } from './components/auth/AccountSwitcher'
@@ -36,10 +35,10 @@ function AppInner() {
     setActiveAccount, setVerified, setCryptoKeys, addAccount
   } = useAuth()
 
-  const [step, setStep]                 = useState<AuthStep>('switcher')
-  const [pendingEmail, setPendingEmail] = useState('')
+  const [step, setStep]                   = useState<AuthStep>('switcher')
+  const [pendingEmail, setPendingEmail]   = useState('')
   const [pendingUserId, setPendingUserId] = useState('')
-  const [pendingKey, setPendingKey]     = useState<CryptoKey | null>(null)
+  const [pendingKey, setPendingKey]       = useState<CryptoKey | null>(null)
 
   // React to lock state
   useEffect(() => {
@@ -106,7 +105,6 @@ function AppInner() {
     addAccount(account)
     await setActiveAccount(account)
     const accountKey = await unlockAccount(account)
-    // Store TOTP secret encrypted
     await storeTOTPSecret(account.id, secret, accountKey)
     setStep('app')
   }
@@ -211,10 +209,8 @@ function AppInner() {
 
 export default function App() {
   return (
-    <BrowserRouter>
-      <AuthProvider>
-        <AppInner />
-      </AuthProvider>
-    </BrowserRouter>
+    <AuthProvider>
+      <AppInner />
+    </AuthProvider>
   )
 }

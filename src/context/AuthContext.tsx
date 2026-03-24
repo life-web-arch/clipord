@@ -4,7 +4,8 @@ import React, {
 } from 'react'
 import { getDeviceId } from '@shared/platform'
 import { db, getDeviceSettings, upsertDeviceSettings, wipeAccountCache } from '@shared/db'
-import type { Account, DeviceSettings, CryptoKeys } from '@shared/types'
+import { supabase } from '@shared/supabase'
+import type { Account, DeviceSettings, CryptoKeys, VerificationMethod } from '@shared/types'
 
 const INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000
 
@@ -132,6 +133,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     localStorage.removeItem('clipord_salt_' + accountId)
     localStorage.removeItem('clipord_bf_' + accountId)
     localStorage.removeItem('clipord_webauthn_' + accountId)
+    localStorage.removeItem('clipord_sb_session_' + accountId)
     setAccounts((prev) => {
       const updated = prev.filter((a) => a.id !== accountId)
       localStorage.setItem('clipord_accounts', JSON.stringify(updated))
@@ -157,6 +159,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (!targetId) return
     const deviceId = getDeviceId()
     const current = await getDeviceSettings(targetId, deviceId)
+    
     const next: DeviceSettings = {
       accountId: targetId,
       deviceId,
@@ -167,9 +170,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       ...current,
       ...updates,
     }
+    
     await upsertDeviceSettings(next)
     if (targetId === activeAccountState?.id) {
       setDeviceSettings(next)
+    }
+
+    // Sync security preferences to Supabase so it's consistent across devices
+    if (updates.verificationMethod || updates.cacheWipeAfterDays !== undefined) {
+      await supabase.auth.updateUser({
+        data: {
+          verificationMethod: next.verificationMethod,
+          cacheWipeAfterDays: next.cacheWipeAfterDays
+        }
+      })
     }
   },[activeAccountState])
 

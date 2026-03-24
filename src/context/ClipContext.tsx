@@ -17,6 +17,7 @@ import { detectClipType, generatePreview } from '@shared/detector'
 import {
   supabase,
   subscribeToClips,
+  subscribeToSpaces,
   getSpacesWithKeys,
   createSpaceInSupabase,
   upsertClipRemote,
@@ -31,6 +32,7 @@ interface ClipContextValue {
   spaces:          Space[]
   activeSpaceId:   string | null
   isLoading:       boolean
+  highlightedClipId: string | null
   setActiveSpace:  (spaceId: string | null) => void
   saveClip:        (content: string, spaceId?: string | null) => Promise<void>
   removeClip:      (clipId: string) => Promise<void>
@@ -48,9 +50,12 @@ export function ClipProvider({ children }: { children: React.ReactNode }) {
   const { activeAccount, cryptoKeys, setCryptoKeys } = useAuth()
   const [clips, setClips]               = useState<Clip[]>([])
   const [spaces, setSpaces]             = useState<Space[]>([])
-  const [activeSpaceId, setActiveSpaceId] = useState<string | null>(null)
-  const[isLoading, setIsLoading]       = useState(false)
+  const[activeSpaceId, setActiveSpaceId] = useState<string | null>(null)
+  const [isLoading, setIsLoading]       = useState(false)
+  const [highlightedClipId, setHighlightedClipId] = useState<string | null>(null)
+  
   const channelRef                      = useRef<RealtimeChannel | null>(null)
+  const spacesChannelRef                = useRef<RealtimeChannel | null>(null)
   const wipeTimerRef                    = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const refreshClips = useCallback(async () => {
@@ -80,6 +85,16 @@ export function ClipProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => { refreshClips() }, [refreshClips])
   useEffect(() => { loadSpaces() }, [loadSpaces])
 
+  // Track spaces creation across devices
+  useEffect(() => {
+    if (!activeAccount) return
+    spacesChannelRef.current?.unsubscribe()
+    spacesChannelRef.current = subscribeToSpaces(activeAccount.id, () => {
+      loadSpaces()
+    })
+    return () => { spacesChannelRef.current?.unsubscribe() }
+  }, [activeAccount, loadSpaces])
+
   useEffect(() => {
     if (!activeAccount) return
     channelRef.current?.unsubscribe()
@@ -92,6 +107,12 @@ export function ClipProvider({ children }: { children: React.ReactNode }) {
         await upsertClip(clip)
         setClips((prev) => {
           const exists = prev.find((c) => c.id === clip.id)
+          if (!exists && !document.hasFocus()) {
+             // Dispatch generic system notification if not actively in the app
+             if ('Notification' in window && Notification.permission === 'granted') {
+               new Notification('New clip added', { body: clip.preview, icon: '/icons/icon-192.png' })
+             }
+          }
           if (exists) return prev.map((c) => c.id === clip.id ? clip : c)
           return [clip, ...prev].sort((a, b) => {
             if (a.pinned && !b.pinned) return -1
@@ -99,6 +120,8 @@ export function ClipProvider({ children }: { children: React.ReactNode }) {
             return b.createdAt.localeCompare(a.createdAt)
           })
         })
+        setHighlightedClipId(clip.id)
+        setTimeout(() => setHighlightedClipId(null), 4000)
       },
       async (row) => {
         const clip = snakeToCamelClip(row)
@@ -123,11 +146,9 @@ export function ClipProvider({ children }: { children: React.ReactNode }) {
         if (item.operation === 'insert' || item.operation === 'update') {
           const { error } = await upsertClipRemote(item.payload)
           success = !error
-          if (error) console.warn('Sync upsert failed:', error)
         } else if (item.operation === 'delete') {
           const { error } = await deleteClipRemote(item.payload['id'] as string)
           success = !error
-          if (error) console.warn('Sync delete failed:', error)
         }
       } catch (e) {
         console.warn('Sync error:', e)
@@ -220,7 +241,7 @@ export function ClipProvider({ children }: { children: React.ReactNode }) {
       createdAt: new Date().toISOString(),
     })
     processSyncQueue()
-  }, [processSyncQueue])
+  },[processSyncQueue])
 
   const tagClip = useCallback(async (clipId: string, tags: string[]) => {
     const clip = await db.clips.get(clipId)
@@ -289,7 +310,7 @@ export function ClipProvider({ children }: { children: React.ReactNode }) {
       accountKey: cryptoKeys.accountKey,
       spaceKeys:  { ...cryptoKeys.spaceKeys, [spaceId]: spaceKey },
     })
-  }, [activeAccount, cryptoKeys, setCryptoKeys])
+  },[activeAccount, cryptoKeys, setCryptoKeys])
 
   return (
     <ClipContext.Provider value={{
@@ -297,6 +318,7 @@ export function ClipProvider({ children }: { children: React.ReactNode }) {
       spaces,
       activeSpaceId,
       isLoading,
+      highlightedClipId,
       setActiveSpace: setActiveSpaceId,
       saveClip,
       removeClip,

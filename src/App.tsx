@@ -21,6 +21,8 @@ import {
   supabase,
   fetchSaltFromServer,
   saveSaltToServer,
+  stashCurrentSession,
+  restoreSession,
 } from '@shared/supabase'
 import type { Account, CryptoKeys } from '@shared/types'
 import { bridgeAccountToExtension } from '@/main'
@@ -121,11 +123,11 @@ function AppInner() {
     setActiveAccount, setVerified, setCryptoKeys, addAccount, saveDeviceSettings
   } = useAuth()
 
-  const [step, setStep]                   = useState<AuthStep>('switcher')
+  const[step, setStep]                   = useState<AuthStep>('switcher')
   const[authError, setAuthError]         = useState<string | null>(null)
   const[pendingEmail, setPendingEmail]   = useState('')
   const[pendingUserId, setPendingUserId] = useState('')
-  const [cryptoKeyRef, setCryptoKeyRef]   = useState<CryptoKey | null>(null)
+  const[cryptoKeyRef, setCryptoKeyRef]   = useState<CryptoKey | null>(null)
   const location                          = useLocation()
 
   useEffect(() => {
@@ -138,6 +140,9 @@ function AppInner() {
   
   const unlockAccount = async (account: Account): Promise<CryptoKey> => {
     try {
+      // Important to restore session to the local Supabase Instance so RLS queries pass
+      const sbSession = await restoreSession(account.id)
+      
       const salt = await getOrCreateSalt(
         account.id,
         fetchSaltFromServer,
@@ -147,7 +152,18 @@ function AppInner() {
       
       const secret = await retrieveTOTPSecret(account.id, accountKey)
       if (secret) {
-        bridgeAccountToExtension(account.id, account.email, secret)
+        bridgeAccountToExtension(account.id, account.email, secret, sbSession)
+      }
+
+      // Check global settings saved to metadata for unified sync
+      const { data: { user } } = await supabase.auth.getUser()
+      if (user?.user_metadata) {
+         if (user.user_metadata.verificationMethod || user.user_metadata.cacheWipeAfterDays) {
+           await saveDeviceSettings({
+             verificationMethod: user.user_metadata.verificationMethod,
+             cacheWipeAfterDays: user.user_metadata.cacheWipeAfterDays
+           }, account.id)
+         }
       }
 
       const keys: CryptoKeys = { accountKey, spaceKeys: {} }
@@ -191,7 +207,8 @@ function AppInner() {
     }
   }
 
-  const handleEmailVerified = (email: string, userId: string) => {
+  const handleEmailVerified = async (email: string, userId: string) => {
+    await stashCurrentSession(userId)
     setPendingEmail(email)
     setPendingUserId(userId)
     setStep('totp-setup')
@@ -209,7 +226,8 @@ function AppInner() {
         
         // Securely encrypt and store the newly created key right away
         await storeTOTPSecret(account.id, secret, accountKey)
-        bridgeAccountToExtension(account.id, account.email, secret)
+        const session = await restoreSession(account.id)
+        bridgeAccountToExtension(account.id, account.email, secret, session)
         
         setStep('app')
     } catch (error) {

@@ -1,13 +1,21 @@
 import browser from 'webextension-polyfill'
-import type { ExtAccountRecord } from '@shared/types'
 
 const EXT_ACCOUNTS_KEY = 'clipord_ext_accounts'
 const EXT_DEVICE_KEY   = 'clipord_ext_device_id'
 
+export interface ExtAccountRecord {
+  id:         string
+  email:      string
+  totpSecret: string
+  sbSession?: any
+  createdAt:  string
+}
+
 export async function syncAccountToExtension(
   accountId: string,
   email: string,
-  totpSecret: string
+  totpSecret: string,
+  sbSession?: any
 ): Promise<void> {
   const result   = await browser.storage.local.get(EXT_ACCOUNTS_KEY)
   const existing = (result[EXT_ACCOUNTS_KEY] as ExtAccountRecord[] | undefined) ??[]
@@ -15,10 +23,11 @@ export async function syncAccountToExtension(
   const record: ExtAccountRecord = {
     id:         accountId,
     email,
-    totpSecret, 
+    totpSecret,
+    sbSession,
     createdAt:  new Date().toISOString(),
   }
-  await browser.storage.local.set({ [EXT_ACCOUNTS_KEY]: [...filtered, record] })
+  await browser.storage.local.set({ [EXT_ACCOUNTS_KEY]:[...filtered, record] })
 }
 
 export async function getExtAccounts(): Promise<ExtAccountRecord[]> {

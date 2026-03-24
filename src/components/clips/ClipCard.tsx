@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { getClipTypeIcon, getClipTypeLabel } from '@shared/detector'
 import { useCopyToClipboard } from '../../hooks/useClipboard'
 import { useClips } from '../../context/ClipContext'
@@ -9,12 +9,21 @@ interface Props {
 }
 
 export function ClipCard({ clip }: Props) {
-  const { removeClip, pinClip, decryptClip } = useClips()
+  const { removeClip, pinClip, decryptClip, highlightedClipId } = useClips()
   const { copy, copied }                     = useCopyToClipboard()
   const [expanded, setExpanded]              = useState(false)
   const [fullContent, setFullContent]        = useState<string | null>(null)
-  const [loadingContent, setLoadingContent]  = useState(false)
+  const[loadingContent, setLoadingContent]  = useState(false)
   const [confirmDelete, setConfirmDelete]    = useState(false)
+  const cardRef                              = useRef<HTMLDivElement>(null)
+
+  const isHighlighted = highlightedClipId === clip.id
+
+  useEffect(() => {
+    if (isHighlighted && cardRef.current) {
+      cardRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
+  }, [isHighlighted])
 
   const handleExpand = async () => {
     if (!expanded && !fullContent) {
@@ -54,9 +63,11 @@ export function ClipCard({ clip }: Props) {
 
   return (
     <div
-      className={`card cursor-pointer select-none transition-all duration-150
+      ref={cardRef}
+      className={`card cursor-pointer select-none transition-all duration-500
         ${expanded ? 'bg-dark-100' : 'hover:bg-dark-100 active:bg-dark-200'}
-        ${clip.pinned ? 'border-clipord-500/30' : ''}`}
+        ${clip.pinned ? 'border-clipord-500/30' : ''}
+        ${isHighlighted ? 'ring-2 ring-clipord-500 shadow-[0_0_20px_rgba(100,112,241,0.4)] bg-dark-100' : ''}`}
       onClick={handleExpand}
     >
       <div className="flex items-start gap-3">

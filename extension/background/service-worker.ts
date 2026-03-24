@@ -64,9 +64,9 @@ browser.runtime.onMessage.addListener(async (message: Record<string, unknown>) =
   const type = message['type'] as string
 
   if (type === 'SYNC_ACCOUNT') {
-    const payload = message['payload'] as Record<string, string>
+    const payload = message['payload'] as Record<string, any>
     if (payload && payload.accountId && payload.email && payload.totpSecret) {
-      await syncAccountToExtension(payload.accountId, payload.email, payload.totpSecret)
+      await syncAccountToExtension(payload.accountId, payload.email, payload.totpSecret, payload.sbSession)
     }
     return true
   }
@@ -98,21 +98,82 @@ browser.runtime.onMessage.addListener(async (message: Record<string, unknown>) =
   }
 })
 
+async function pushClipToSupabaseRemote(clip: StoredClip, accountId: string) {
+  try {
+    const accounts = await getExtAccounts()
+    const act = accounts.find(a => a.id === accountId)
+    if (!act || !act.sbSession) return
+
+    const { supabaseUrl, anonKey, session } = act.sbSession
+    if (!supabaseUrl || !anonKey || !session?.access_token) return
+
+    const url = `${supabaseUrl}/rest/v1/clips`
+    
+    // Format JSON as Supabase Expects snake_case
+    const payload = {
+      id: clip.id,
+      account_id: clip.accountId,
+      space_id: clip.spaceId,
+      type: clip.type,
+      preview: clip.preview,
+      encrypted_content: clip.encryptedContent,
+      iv: clip.iv,
+      pinned: false,
+      tags:[],
+      wipe_at: null,
+      created_at: clip.createdAt,
+      updated_at: clip.createdAt
+    }
+
+    await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': anonKey,
+        'Authorization': `Bearer ${session.access_token}`,
+        'Prefer': 'resolution=minimal'
+      },
+      body: JSON.stringify(payload)
+    })
+  } catch (err) {
+    console.error("Failed to push clip to Supabase remote", err)
+  }
+}
+
 async function saveClip(
   accountId: string,
   content: string,
   spaceId: string | null
 ): Promise<void> {
-  const clip: StoredClip = {
+  const enc = new TextEncoder()
+  const deviceId = await getExtDeviceId()
+  const rawKey = enc.encode(accountId + ':' + deviceId + ':clipord-ext-storage')
+  const km = await crypto.subtle.importKey('raw', rawKey, 'PBKDF2', false, ['deriveKey'])
+  const salt = enc.encode(accountId.slice(0, 16).padEnd(16, '0'))
+  const accountKey = await crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt, iterations: 100_000, hash: 'SHA-256' },
+    km,
+    { name: 'AES-GCM', length: 256 },
+    false, ['encrypt', 'decrypt']
+  )
+
+  const { ciphertext, iv } = await encryptText(content, accountKey)
+
+  // Use StoredClip interface with encrypted contents
+  const clip: any = {
     id:        crypto.randomUUID(),
     accountId,
     spaceId,
-    content,
+    content,  // will be saved as encrypted
+    encryptedContent: ciphertext,
+    iv,
     type:      detectClipType(content),
     preview:   generatePreview(content, 60),
     createdAt: new Date().toISOString(),
   }
+  
   await addClipEncrypted(accountId, clip)
+  await pushClipToSupabaseRemote(clip, accountId)
 }
 
 async function handleClipboardContent(content: string): Promise<void> {
@@ -190,7 +251,7 @@ async function isLastClipboard(content: string): Promise<boolean> {
     const deviceId = await getExtDeviceId()
     const enc      = new TextEncoder()
     const rawKey   = enc.encode(accountId + ':' + deviceId + ':last-cb')
-    const km       = await crypto.subtle.importKey('raw', rawKey, 'PBKDF2', false, ['deriveKey'])
+    const km       = await crypto.subtle.importKey('raw', rawKey, 'PBKDF2', false,['deriveKey'])
     const salt     = enc.encode(accountId.slice(0, 16).padEnd(16, '0'))
     const key      = await crypto.subtle.deriveKey(
       { name: 'PBKDF2', salt, iterations: 10_000, hash: 'SHA-256' },

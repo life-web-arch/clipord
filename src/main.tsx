@@ -2,7 +2,7 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
 import App from './App'
-import ErrorBoundary from './ErrorBoundary' // <-- IMPORT THE BOUNDARY
+import ErrorBoundary from './ErrorBoundary'
 import './index.css'
 
 // ---- PWA Install prompt ----
@@ -39,16 +39,26 @@ if ('serviceWorker' in navigator) {
 export function bridgeAccountToExtension(
   accountId: string,
   email: string,
-  totpSecret: string
+  totpSecret: string,
+  sbSession?: any
 ): void {
   window.dispatchEvent(new CustomEvent('clipord:sync-account', {
-    detail: { accountId, email, totpSecret }
+    detail: { 
+      accountId, 
+      email, 
+      totpSecret, 
+      sbSession: {
+        session: sbSession,
+        supabaseUrl: import.meta.env.VITE_SUPABASE_URL,
+        anonKey: import.meta.env.VITE_SUPABASE_ANON_KEY
+      } 
+    }
   }))
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <ErrorBoundary> {/* <-- WRAP THE ENTIRE APP */}
+    <ErrorBoundary>
       <BrowserRouter>
         <App />
       </BrowserRouter>

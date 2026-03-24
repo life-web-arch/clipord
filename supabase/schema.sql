@@ -1,7 +1,7 @@
 -- Enable UUID extension
 create extension if not exists "uuid-ossp";
 
--- Spaces table (before clips — clips reference it)
+-- Spaces table
 create table if not exists spaces (
   id                    uuid primary key default uuid_generate_v4(),
   name                  text not null,
@@ -141,7 +141,7 @@ drop policy if exists "own push subscription" on push_subscriptions;
 create policy "own push subscription" on push_subscriptions
   for all using (account_id = auth.uid());
 
--- Realtime Configuration (Robust handling for existing publication / tables)
+-- Realtime Configuration
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
@@ -150,5 +150,6 @@ BEGIN
 END $$;
 
 DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE clips; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE spaces; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE space_invites; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE space_members; EXCEPTION WHEN duplicate_object THEN NULL; END $$;

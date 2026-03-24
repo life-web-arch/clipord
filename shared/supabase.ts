@@ -10,7 +10,6 @@ if (!supabaseUrl || !supabaseKey) {
   throw new Error('Missing Supabase env vars: VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY')
 }
 
-// Safely provide localStorage, preventing crashes in Extension background workers
 const storageAdapter = typeof window !== 'undefined' ? window.localStorage : undefined
 
 export const supabase = createClient(supabaseUrl, supabaseKey, {
@@ -24,6 +23,32 @@ export const supabase = createClient(supabaseUrl, supabaseKey, {
     params: { eventsPerSecond: 10 },
   },
 })
+
+// ---- Multi-Account Session Management ----
+
+export async function stashCurrentSession(accountId: string) {
+  if (typeof localStorage === 'undefined') return null
+  const { data } = await supabase.auth.getSession()
+  if (data.session) {
+    localStorage.setItem('clipord_sb_session_' + accountId, JSON.stringify(data.session))
+    return data.session
+  }
+  return null
+}
+
+export async function restoreSession(accountId: string) {
+  if (typeof localStorage === 'undefined') return null
+  const raw = localStorage.getItem('clipord_sb_session_' + accountId)
+  if (raw) {
+    const session = JSON.parse(raw)
+    await supabase.auth.setSession({ 
+      access_token: session.access_token, 
+      refresh_token: session.refresh_token 
+    })
+    return session
+  }
+  return null
+}
 
 // ---- Auth ----
 
@@ -72,7 +97,7 @@ export async function getSession() {
   return data.session
 }
 
-// ---- Salt sync (for true cross-device E2E) ----
+// ---- Salt & Settings sync (for true cross-device E2E) ----
 
 export async function fetchSaltFromServer(): Promise<string | null> {
   const user = await getCurrentUser()
@@ -132,6 +157,17 @@ export function subscribeToClips(
     .subscribe()
 }
 
+export function subscribeToSpaces(
+  accountId: string,
+  onRefresh: () => void
+): RealtimeChannel {
+  return supabase
+    .channel('spaces:' + accountId)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'spaces' }, () => onRefresh())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'space_members' }, () => onRefresh())
+    .subscribe()
+}
+
 export function subscribeToSpaceInvites(
   spaceId: string,
   onPending: (invite: Record<string, unknown>) => void
@@ -142,20 +178,6 @@ export function subscribeToSpaceInvites(
       'postgres_changes',
       { event: 'INSERT', schema: 'public', table: 'space_invites', filter: 'space_id=eq.' + spaceId },
       (payload) => onPending(payload.new as Record<string, unknown>)
-    )
-    .subscribe()
-}
-
-export function subscribeToSpaceMembers(
-  spaceId: string,
-  onUpdate: (member: Record<string, unknown>) => void
-): RealtimeChannel {
-  return supabase
-    .channel('members:' + spaceId)
-    .on(
-      'postgres_changes',
-      { event: 'UPDATE', schema: 'public', table: 'space_members', filter: 'space_id=eq.' + spaceId },
-      (payload) => onUpdate(payload.new as Record<string, unknown>)
     )
     .subscribe()
 }
@@ -267,55 +289,6 @@ export async function getSpacesWithKeys(
   return { spaces, spaceKeys }
 }
 
-// ---- Invite CRUD ----
-
-export interface InviteRow {
-  id:          string
-  space_id:    string
-  created_by:  string
-  token:       string
-  expires_at:  string
-  used_at:     string | null
-  approved:    boolean
-  approved_by: string | null
-}
-
-export async function createInvite(
-  spaceId: string,
-  createdBy: string,
-  isCreator: boolean
-): Promise<{ token: string | null; error: string | null }> {
-  const token     = crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '')
-  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
-
-  const { error } = await supabase.from('space_invites').insert({
-    id:         crypto.randomUUID(),
-    space_id:   spaceId,
-    created_by: createdBy,
-    token,
-    expires_at: expiresAt,
-    approved:   isCreator,
-  })
-
-  return { token: error ? null : token, error: error?.message ?? null }
-}
-
-export async function getInviteByToken(token: string): Promise<{ data: InviteRow | null; error: string | null }> {
-  const { data, error } = await supabase
-    .from('space_invites')
-    .select('*')
-    .eq('token', token)
-    .single()
-  return { data: data as InviteRow | null, error: error?.message ?? null }
-}
-
-export async function markInviteUsed(inviteId: string): Promise<void> {
-  await supabase
-    .from('space_invites')
-    .update({ used_at: new Date().toISOString() })
-    .eq('id', inviteId)
-}
-
 // ---- Clip remote CRUD ----
 
 export async function upsertClipRemote(
@@ -329,8 +302,6 @@ export async function deleteClipRemote(clipId: string): Promise<{ error: string 
   const { error } = await supabase.from('clips').delete().eq('id', clipId)
   return { error: error?.message ?? null }
 }
-
-// ---- Push subscription storage ----
 
 export async function savePushSubscription(
   accountId: string,

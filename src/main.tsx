@@ -2,6 +2,7 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
 import App from './App'
+import ErrorBoundary from './ErrorBoundary' // <-- IMPORT THE BOUNDARY
 import './index.css'
 
 // ---- PWA Install prompt ----
@@ -30,24 +31,11 @@ if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker
       .register('/sw.js')
-      .then((reg) => {
-        reg.addEventListener('updatefound', () => {
-          const nw = reg.installing
-          if (nw) {
-            nw.addEventListener('statechange', () => {
-              if (nw.state === 'installed' && navigator.serviceWorker.controller) {
-                window.dispatchEvent(new CustomEvent('clipord:sw-updated'))
-              }
-            })
-          }
-        })
-      })
       .catch(console.error)
   })
 }
 
 // ---- Extension auth bridge ----
-// Safely dispatch cross-domain boundary custom event to be captured by Chrome extension content scripts
 export function bridgeAccountToExtension(
   accountId: string,
   email: string,
@@ -60,8 +48,10 @@ export function bridgeAccountToExtension(
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <BrowserRouter>
-      <App />
-    </BrowserRouter>
+    <ErrorBoundary> {/* <-- WRAP THE ENTIRE APP */}
+      <BrowserRouter>
+        <App />
+      </BrowserRouter>
+    </ErrorBoundary>
   </React.StrictMode>
 )

@@ -11,7 +11,7 @@ interface Props {
 
 export function LockScreen({ onUnlocked }: Props) {
   const { activeAccount, deviceSettings, setCryptoKeys, setVerified } = useAuth()
-  const [showForgot, setShowForgot]   = useState(false)
+  const [showForgot, setShowForgot]     = useState(false)
   const [showFallback, setShowFallback] = useState(false)
 
   if (!activeAccount) return null
@@ -19,12 +19,12 @@ export function LockScreen({ onUnlocked }: Props) {
   const method: VerificationMethod = deviceSettings?.verificationMethod ?? 'totp'
 
   const handleVerified = async () => {
-    // Re-derive crypto keys on unlock
-    const { deriveKeyFromPassphrase, base64ToBuf } = await import('@shared/crypto')
-    const saltKey = `clipord_salt_${activeAccount.id}`
+    const {
+      deriveKeyFromPassphrase, base64ToBuf, generateSalt, bufToBase64
+    } = await import('@shared/crypto')
+    const saltKey = 'clipord_salt_' + activeAccount.id
     let saltStr   = localStorage.getItem(saltKey)
     if (!saltStr) {
-      const { generateSalt, bufToBase64 } = await import('@shared/crypto')
       saltStr = bufToBase64(generateSalt())
       localStorage.setItem(saltKey, saltStr)
     }
@@ -40,6 +40,7 @@ export function LockScreen({ onUnlocked }: Props) {
       <ForgotAccess
         accountId={activeAccount.id}
         email={activeAccount.email}
+        cryptoKey={null}
         onRecovered={handleVerified}
         onBack={() => setShowForgot(false)}
       />

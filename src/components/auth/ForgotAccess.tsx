@@ -1,47 +1,44 @@
 import { useState } from 'react'
 import * as OTPAuth from 'otpauth'
 import { sendPasswordResetEmail } from '@shared/supabase'
+import { retrieveTOTPSecret } from '@shared/crypto'
 import { Spinner } from '../ui/Spinner'
 
 interface Props {
   accountId:   string
   email:       string
+  cryptoKey:   CryptoKey | null
   onRecovered: () => void
   onBack:      () => void
 }
 
-export function ForgotAccess({ accountId, email, onRecovered, onBack }: Props) {
-  const [mode, setMode]             = useState<'choose' | 'totp' | 'email'>('choose')
-  const [code, setCode]             = useState('')
-  const [loading, setLoading]       = useState(false)
-  const [error, setError]           = useState<string | null>(null)
-  const [emailSent, setEmailSent]   = useState(false)
+export function ForgotAccess({ accountId, email, cryptoKey, onRecovered, onBack }: Props) {
+  const [mode, setMode]           = useState<'choose' | 'totp' | 'email'>('choose')
+  const [code, setCode]           = useState('')
+  const [loading, setLoading]     = useState(false)
+  const [error, setError]         = useState<string | null>(null)
+  const [emailSent, setEmailSent] = useState(false)
 
   const handleTOTP = async () => {
     setLoading(true)
     setError(null)
-
-    // Try plaintext copy first (written by TOTPSetup for extension compatibility)
-    // Fall back to nothing — we can't decrypt without the accountKey here
-    const secret = localStorage.getItem(`clipord_totp_${accountId}`)
-
-    if (!secret) {
-      setError(
-        'TOTP secret not accessible. If you previously reset your device, ' +
-        'please use the email reset option instead.'
-      )
-      setLoading(false)
-      return
-    }
-
     try {
+      let secret: string | null = null
+      if (cryptoKey) {
+        secret = await retrieveTOTPSecret(accountId, cryptoKey)
+      } else {
+        secret = localStorage.getItem(`clipord_totp_${accountId}`)
+      }
+      if (!secret) { setError('No authenticator configured for this account'); setLoading(false); return }
+
       const totp = new OTPAuth.TOTP({
         issuer: 'Clipord', label: email, algorithm: 'SHA1',
-        digits: 6, period: 30, secret: OTPAuth.Secret.fromBase32(secret),
+        digits: 6, period: 30,
+        secret: OTPAuth.Secret.fromBase32(secret),
       })
       const delta = totp.validate({ token: code, window: 1 })
       if (delta === null) {
-        setError('Invalid code. Please check your authenticator app.')
+        setError('Invalid code. Check your authenticator app.')
       } else {
         onRecovered()
       }
@@ -54,19 +51,21 @@ export function ForgotAccess({ accountId, email, onRecovered, onBack }: Props) {
   const handleEmailReset = async () => {
     setLoading(true)
     setError(null)
-    const { error: err } = await sendPasswordResetEmail(email)
-    if (err) {
-      setError(err)
-    } else {
-      setEmailSent(true)
-    }
+    const redirectTo = window.location.origin + '/reset-password'
+    const { error: err } = await sendPasswordResetEmail(email, redirectTo)
+    if (err) { setError(err) } else { setEmailSent(true) }
     setLoading(false)
   }
 
   return (
     <div className="min-h-screen bg-dark-0 flex flex-col items-center justify-center px-6 safe-top safe-bottom">
       <div className="w-full max-w-sm">
-        <button onClick={onBack} className="text-white/40 text-sm mb-8 hover:text-white/60">← Back</button>
+        <button
+          onClick={onBack}
+          className="text-white/40 text-sm mb-8 hover:text-white/60 transition-colors flex items-center gap-1"
+        >
+          ← Back
+        </button>
 
         {mode === 'choose' && (
           <>
@@ -85,7 +84,9 @@ export function ForgotAccess({ accountId, email, onRecovered, onBack }: Props) {
                 className="w-full card text-left hover:bg-dark-100 transition-colors"
               >
                 <p className="text-white font-medium">📧 Reset via email</p>
-                <p className="text-white/40 text-sm mt-1">We'll send a reset link to {email}</p>
+                <p className="text-white/40 text-sm mt-1">
+                  We'll send a reset link to <span className="text-white/60">{email}</span>
+                </p>
               </button>
             </div>
           </>
@@ -128,13 +129,9 @@ export function ForgotAccess({ accountId, email, onRecovered, onBack }: Props) {
             {!emailSent ? (
               <>
                 <p className="text-white/40 text-sm mb-8">
-                  A password reset link will be sent to{' '}
-                  <span className="text-white/60">{email}</span>. It expires in 1 hour.
-                  <br /><br />
-                  <span className="text-yellow-400/70 text-xs">
-                    ⚠️ Note: resetting via email will require you to set up your
-                    authenticator app again on next login.
-                  </span>
+                  A reset link will be sent to{' '}
+                  <span className="text-white/70 font-medium">{email}</span>.
+                  The link expires in 1 hour.
                 </p>
                 {error && (
                   <div className="bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3 mb-4">
@@ -152,14 +149,10 @@ export function ForgotAccess({ accountId, email, onRecovered, onBack }: Props) {
             ) : (
               <div className="text-center">
                 <div className="text-5xl mb-4">📬</div>
-                <p className="text-white/70 text-sm">
-                  Reset link sent to{' '}
-                  <span className="text-white font-medium">{email}</span>.
-                  Check your inbox and spam folder.
-                </p>
-                <p className="text-white/30 text-xs mt-4">
-                  Click the link in the email to reset your account,
-                  then sign in again with a new authenticator setup.
+                <p className="text-white font-medium mb-2">Reset link sent!</p>
+                <p className="text-white/50 text-sm">
+                  Check your inbox (and spam folder) for an email from Clipord.
+                  Click the link in the email to set a new password.
                 </p>
               </div>
             )}

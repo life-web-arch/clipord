@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
-import { Routes, Route, useSearchParams } from 'react-router-dom'
+import { Routes, Route, useNavigate, useLocation } from 'react-router-dom'
 import { AuthProvider, useAuth } from './context/AuthContext'
-import { ClipProvider, useClips } from './context/ClipContext'
+import { ClipProvider } from './context/ClipContext'
 import { AccountSwitcher } from './components/auth/AccountSwitcher'
 import { EmailOTP } from './components/auth/EmailOTP'
 import { TOTPSetup } from './components/auth/TOTPSetup'
@@ -12,8 +12,11 @@ import { LockScreen } from './components/auth/LockScreen'
 import { MainApp } from './pages/MainApp'
 import { ResetPassword } from './pages/ResetPassword'
 import {
-  deriveKeyFromPassphrase, generateSalt,
-  bufToBase64, base64ToBuf, storeTOTPSecret
+  deriveKeyFromPassphrase,
+  generateSalt,
+  bufToBase64,
+  base64ToBuf,
+  storeTOTPSecret,
 } from '@shared/crypto'
 import { upsertDeviceSettings } from '@shared/db'
 import { getDeviceId } from '@shared/platform'
@@ -29,34 +32,17 @@ type AuthStep =
   | 'locked'
   | 'app'
 
-// ---- IntentHandler: must be inside ClipProvider ----
-function IntentHandler() {
-  const { createSpace } = useClips()
-  const [searchParams, setSearchParams] = useSearchParams()
-
-  useEffect(() => {
-    const intent = searchParams.get('intent')
-    const name   = searchParams.get('name')
-    if (intent === 'create-space' && name) {
-      createSpace(name).catch(console.error)
-      setSearchParams({})
-    }
-  }, [createSpace, searchParams, setSearchParams])
-
-  return null
-}
-
-// ---- Invite accept page ----
+// ---- Invite accept page (inside authenticated shell) ----
 function InviteAccept() {
-  const { activeAccount, isVerified } = useAuth()
+  const { isVerified } = useAuth()
+  const location = useLocation()
+  const navigate = useNavigate()
+  const token = location.pathname.split('/invite/')[1] ?? ''
   const [status, setStatus] = useState<'pending' | 'accepted' | 'error'>('pending')
 
-  const token = window.location.pathname.split('/invite/')[1]
-
   useEffect(() => {
-    if (!token || !isVerified || !activeAccount) return
-
-    async function accept() {
+    if (!isVerified || !token) return
+    const accept = async () => {
       try {
         const { supabase } = await import('@shared/supabase')
         const { data: invite, error: inviteErr } = await supabase
@@ -74,17 +60,15 @@ function InviteAccept() {
           .update({ used_at: new Date().toISOString() })
           .eq('id', invite.id)
 
-        // Add user as pending member
         await supabase
           .from('space_members')
           .insert({
             space_id:            invite.space_id,
-            account_id:          activeAccount!.id,
+            account_id:          invite.created_by,
             role:                'member',
-            encrypted_space_key: '',  // Will be set when creator approves
+            encrypted_space_key: '',
             iv:                  '',
           })
-          .throwOnError()
 
         setStatus('accepted')
       } catch {
@@ -92,7 +76,7 @@ function InviteAccept() {
       }
     }
     accept()
-  }, [token, isVerified, activeAccount])
+  }, [token, isVerified])
 
   return (
     <div className="min-h-screen bg-dark-0 flex items-center justify-center px-6">
@@ -108,17 +92,23 @@ function InviteAccept() {
             <div className="text-4xl mb-4">✅</div>
             <p className="text-white font-semibold mb-2">Invite accepted!</p>
             <p className="text-white/40 text-sm mb-6">
-              The space creator will approve your request. You'll see the space once approved.
+              The space creator will approve your request.
             </p>
-            <a href="/" className="btn-primary px-6 py-2.5 inline-block">Go to app</a>
+            <button onClick={() => navigate('/')} className="btn-primary px-6 py-2.5">
+              Go to app
+            </button>
           </>
         )}
         {status === 'error' && (
           <>
             <div className="text-4xl mb-4">❌</div>
             <p className="text-white font-semibold mb-2">Invalid or expired invite</p>
-            <p className="text-white/40 text-sm mb-6">This link may have already been used or has expired.</p>
-            <a href="/" className="btn-primary px-6 py-2.5 inline-block">Go to app</a>
+            <p className="text-white/40 text-sm mb-6">
+              This link may have already been used or has expired.
+            </p>
+            <button onClick={() => navigate('/')} className="btn-primary px-6 py-2.5">
+              Go to app
+            </button>
           </>
         )}
       </div>
@@ -126,19 +116,37 @@ function InviteAccept() {
   )
 }
 
-// ---- Inner app shell — handles auth state machine ----
+// ---- Intent handler (e.g. from extension create-space) ----
+function IntentHandler() {
+  const location = useLocation()
+  useEffect(() => {
+    const params = new URLSearchParams(location.search)
+    const intent = params.get('intent')
+    if (intent === 'create-space') {
+      const name = params.get('name')
+      if (name) {
+        window.dispatchEvent(new CustomEvent('clipord:create-space', { detail: { name } }))
+      }
+    }
+  }, [location])
+  return null
+}
+
+// ---- Main auth state machine ----
 function AppInner() {
   const {
     accounts, activeAccount, deviceSettings,
     isVerified, isLocked,
-    setActiveAccount, setVerified, setCryptoKeys, addAccount
+    setActiveAccount, setVerified, setCryptoKeys, addAccount,
   } = useAuth()
 
   const [step, setStep]                   = useState<AuthStep>('switcher')
   const [pendingEmail, setPendingEmail]   = useState('')
   const [pendingUserId, setPendingUserId] = useState('')
-  const [pendingKey, setPendingKey]       = useState<CryptoKey | null>(null)
+  const [cryptoKeyRef, setCryptoKeyRef]   = useState<CryptoKey | null>(null)
+  const location = useLocation()
 
+  // React to lock state
   useEffect(() => {
     if (isLocked && step === 'app') setStep('locked')
   }, [isLocked, step])
@@ -148,7 +156,7 @@ function AppInner() {
   }, [accounts])
 
   const unlockAccount = async (account: Account): Promise<CryptoKey> => {
-    const saltKey = `clipord_salt_${account.id}`
+    const saltKey = 'clipord_salt_' + account.id
     let saltStr   = localStorage.getItem(saltKey)
     if (!saltStr) {
       saltStr = bufToBase64(generateSalt())
@@ -158,6 +166,7 @@ function AppInner() {
     const accountKey = await deriveKeyFromPassphrase(account.id, salt)
     const keys: CryptoKeys = { accountKey, spaceKeys: {} }
     setCryptoKeys(keys)
+    setCryptoKeyRef(accountKey)
     setVerified(true)
     const deviceId = getDeviceId()
     await upsertDeviceSettings({
@@ -173,8 +182,9 @@ function AppInner() {
 
   const handleSelectAccount = async (account: Account) => {
     await setActiveAccount(account)
-    const hasTOTP = !!localStorage.getItem(`clipord_totp_enc_${account.id}`) ||
-                    !!localStorage.getItem(`clipord_totp_${account.id}`)
+    const hasTOTP =
+      !!localStorage.getItem('clipord_totp_enc_' + account.id) ||
+      !!localStorage.getItem('clipord_totp_' + account.id)
     if (!hasTOTP) { setStep('add-account-email'); return }
 
     if (deviceSettings?.verificationEnabled === false) {
@@ -219,22 +229,25 @@ function AppInner() {
     setStep('app')
   }
 
-  const handleLockScreenUnlocked = () => setStep('app')
-
   // ---- Render ----
 
+  // Reset password page — always accessible regardless of auth state
+  if (location.pathname === '/reset-password') {
+    return <ResetPassword />
+  }
+
   if (step === 'locked') {
-    return <LockScreen onUnlocked={handleLockScreenUnlocked} />
+    return <LockScreen onUnlocked={() => setStep('app')} />
   }
 
   if (step === 'app' && isVerified) {
     return (
-      // ClipProvider MUST wrap everything that calls useClips()
       <ClipProvider>
         <IntentHandler />
         <Routes>
           <Route path="/*" element={<MainApp />} />
           <Route path="/invite/:token" element={<InviteAccept />} />
+          <Route path="/reset-password" element={<ResetPassword />} />
         </Routes>
       </ClipProvider>
     )
@@ -273,7 +286,7 @@ function AppInner() {
       <TOTPVerify
         accountId={activeAccount.id}
         email={activeAccount.email}
-        cryptoKey={pendingKey}
+        cryptoKey={cryptoKeyRef}
         onVerified={handleTOTPVerified}
         onForgot={() => setStep('forgot')}
       />
@@ -297,6 +310,7 @@ function AppInner() {
       <ForgotAccess
         accountId={activeAccount.id}
         email={activeAccount.email}
+        cryptoKey={cryptoKeyRef}
         onRecovered={handleTOTPVerified}
         onBack={() => setStep(
           deviceSettings?.verificationMethod === 'biometric' ? 'biometric-verify' : 'totp-verify'
@@ -312,9 +326,7 @@ export default function App() {
   return (
     <AuthProvider>
       <Routes>
-        {/* Password reset page — outside auth flow, handles Supabase redirect */}
         <Route path="/reset-password" element={<ResetPassword />} />
-        {/* Everything else */}
         <Route path="/*" element={<AppInner />} />
       </Routes>
     </AuthProvider>

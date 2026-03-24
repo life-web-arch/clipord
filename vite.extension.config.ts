@@ -6,22 +6,11 @@ import { viteStaticCopy } from 'vite-plugin-static-copy'
 export default defineConfig({
   plugins: [
     react(),
-    // Copy extension manifest and icons to dist/extension/
     viteStaticCopy({
       targets: [
-        {
-          src: 'extension/manifest.json',
-          dest: '.',
-        },
-        {
-          src: 'extension/icons/*',
-          dest: 'icons',
-        },
-        // Also copy public icons if extension uses them
-        {
-          src: 'public/icons/*',
-          dest: 'icons',
-        },
+        { src: 'extension/manifest.json', dest: '.' },
+        { src: 'extension/icons/*', dest: 'icons' },
+        { src: 'public/icons/*', dest: 'icons' },
       ],
     }),
   ],

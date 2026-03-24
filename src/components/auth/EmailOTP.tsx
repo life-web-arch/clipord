@@ -4,7 +4,7 @@ import { Spinner } from '../ui/Spinner'
 
 interface Props {
   onVerified: (email: string, userId: string) => void
-  onBack:     () => void
+  onBack: () => void
 }
 
 export function EmailOTP({ onVerified, onBack }: Props) {
@@ -16,10 +16,11 @@ export function EmailOTP({ onVerified, onBack }: Props) {
   const [resending, setResending] = useState(false)
 
   const handleSendOTP = async () => {
-    if (!email.trim()) return
+    const trimmed = email.trim().toLowerCase()
+    if (!trimmed) return
     setLoading(true)
     setError(null)
-    const { error: err } = await sendEmailOTP(email.trim().toLowerCase())
+    const { error: err } = await sendEmailOTP(trimmed)
     if (err) {
       setError(err)
     } else {
@@ -38,21 +39,15 @@ export function EmailOTP({ onVerified, onBack }: Props) {
   }
 
   const handleVerifyOTP = async () => {
-    if (!otp.trim() || otp.length < 6) return
+    const trimmed = otp.trim()
+    if (trimmed.length < 6) return
     setLoading(true)
     setError(null)
-    const { error: err } = await verifyEmailOTP(email.trim().toLowerCase(), otp.trim())
-    if (err) {
-      setError(err)
-      setLoading(false)
-      return
-    }
-    const { getCurrentUser } = await import('@shared/supabase')
-    const user = await getCurrentUser()
-    if (user) {
-      onVerified(email.trim().toLowerCase(), user.id)
+    const { error: err, userId } = await verifyEmailOTP(email.trim().toLowerCase(), trimmed)
+    if (err || !userId) {
+      setError(err ?? 'Verification failed. Please try again.')
     } else {
-      setError('Could not retrieve user. Please try again.')
+      onVerified(email.trim().toLowerCase(), userId)
     }
     setLoading(false)
   }
@@ -60,7 +55,10 @@ export function EmailOTP({ onVerified, onBack }: Props) {
   return (
     <div className="min-h-screen bg-dark-0 flex flex-col items-center justify-center px-6 safe-top safe-bottom">
       <div className="w-full max-w-sm">
-        <button onClick={onBack} className="text-white/40 text-sm mb-8 hover:text-white/60 transition-colors">
+        <button
+          onClick={onBack}
+          className="text-white/40 text-sm mb-8 hover:text-white/60 transition-colors flex items-center gap-1"
+        >
           ← Back
         </button>
 
@@ -71,18 +69,9 @@ export function EmailOTP({ onVerified, onBack }: Props) {
           <p className="text-white/40 text-sm mt-2">
             {step === 'email'
               ? "We'll send a 6-digit verification code"
-              : `Enter the 6-digit code sent to ${email}`}
+              : 'Enter the 6-digit code from the email we sent to ' + email}
           </p>
         </div>
-
-        {step === 'otp' && (
-          <div className="bg-clipord-950/50 border border-clipord-500/20 rounded-xl px-4 py-3 mb-4">
-            <p className="text-clipord-300 text-xs">
-              📬 <strong>Look for an email from Supabase</strong> with subject "Your verification code"
-              or "Confirm your email". The email contains a 6-digit number — enter it below.
-            </p>
-          </div>
-        )}
 
         {error && (
           <div className="bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3 mb-4">
@@ -101,24 +90,36 @@ export function EmailOTP({ onVerified, onBack }: Props) {
               className="input-field mb-4"
               autoFocus
               autoComplete="email"
+              inputMode="email"
             />
             <button
               onClick={handleSendOTP}
               disabled={loading || !email.trim()}
               className="btn-primary w-full flex items-center justify-center gap-2"
             >
-              {loading ? <Spinner size="sm" /> : 'Send code'}
+              {loading ? <Spinner size="sm" /> : 'Send 6-digit code'}
             </button>
+            <p className="text-white/20 text-xs text-center mt-4">
+              You'll receive a 6-digit code — not a link
+            </p>
           </>
         ) : (
           <>
+            <div className="bg-clipord-950/50 border border-clipord-500/20 rounded-xl px-4 py-3 mb-4">
+              <p className="text-clipord-300 text-xs">
+                📧 Sent to <span className="font-medium">{email}</span>
+              </p>
+              <p className="text-white/40 text-xs mt-1">
+                Look for an email with subject containing your 6-digit code. Check spam if needed.
+              </p>
+            </div>
             <input
               type="text"
               value={otp}
               onChange={(e) => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
               onKeyDown={(e) => e.key === 'Enter' && handleVerifyOTP()}
               placeholder="000000"
-              className="input-field mb-2 text-center text-xl tracking-widest font-mono"
+              className="input-field mb-2 text-center text-2xl tracking-[0.5em] font-mono"
               autoFocus
               inputMode="numeric"
               maxLength={6}
@@ -126,22 +127,19 @@ export function EmailOTP({ onVerified, onBack }: Props) {
             />
             <p className="text-white/30 text-xs text-center mb-4">
               Didn't receive it?{' '}
-              {resending ? (
-                <span className="text-clipord-400">Sending…</span>
-              ) : (
-                <button
-                  onClick={handleResend}
-                  className="text-clipord-400 hover:underline"
-                >
-                  Resend code
-                </button>
-              )}
-              {' '}or{' '}
               <button
-                onClick={() => { setStep('email'); setOtp('') }}
-                className="text-clipord-400 hover:underline"
+                onClick={handleResend}
+                disabled={resending}
+                className="text-clipord-400 hover:underline disabled:opacity-50"
               >
-                change email
+                {resending ? 'Sending…' : 'Resend code'}
+              </button>
+              {' · '}
+              <button
+                onClick={() => { setStep('email'); setOtp(''); setError(null) }}
+                className="text-white/40 hover:text-white/60"
+              >
+                Change email
               </button>
             </p>
             <button
@@ -149,7 +147,7 @@ export function EmailOTP({ onVerified, onBack }: Props) {
               disabled={loading || otp.length < 6}
               className="btn-primary w-full flex items-center justify-center gap-2"
             >
-              {loading ? <Spinner size="sm" /> : 'Verify'}
+              {loading ? <Spinner size="sm" /> : 'Verify code'}
             </button>
           </>
         )}

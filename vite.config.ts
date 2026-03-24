@@ -12,6 +12,7 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist/pwa',
+    emptyOutDir: true,
     rollupOptions: {
       input: {
         main: resolve(__dirname, 'index.html'),

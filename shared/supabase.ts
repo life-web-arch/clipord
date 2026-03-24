@@ -1,46 +1,32 @@
 import { createClient } from '@supabase/supabase-js'
+import type { RealtimeChannel } from '@supabase/supabase-js'
 
-const supabaseUrl  = import.meta.env.VITE_SUPABASE_URL  as string
-const supabaseKey  = import.meta.env.VITE_SUPABASE_ANON_KEY as string
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string
+const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string
 
 if (!supabaseUrl || !supabaseKey) {
-  throw new Error('Missing Supabase environment variables')
+  throw new Error('Missing Supabase environment variables. Check VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.')
 }
 
 export const supabase = createClient(supabaseUrl, supabaseKey, {
   auth: {
-    persistSession:     true,
-    autoRefreshToken:   true,
+    persistSession: true,
+    autoRefreshToken: true,
     detectSessionInUrl: true,
-    // Use PKCE flow for security
-    flowType: 'pkce',
   },
   realtime: {
     params: { eventsPerSecond: 10 },
   },
 })
 
-/**
- * Send a 6-digit OTP to the user's email.
- *
- * IMPORTANT — Supabase dashboard setup required:
- *   Authentication → Email → OTP Expiry: 600 (10 min)
- *   Authentication → Email → "Enable Email OTP": ON
- *   Authentication → Templates → "Magic Link" template:
- *     Change subject to "Your Clipord verification code"
- *     Change body to: "Your verification code is: {{ .Token }}"
- *     (This makes Supabase send the raw 6-digit OTP, not a link)
- *
- *   OR go to Authentication → Settings → enable "OTP" login
- *   and disable "Magic link" so users get a code, not a URL.
- */
+// ---- Auth helpers ----
+
 export async function sendEmailOTP(email: string): Promise<{ error: string | null }> {
   const { error } = await supabase.auth.signInWithOtp({
     email,
     options: {
       shouldCreateUser: true,
-      // This tells Supabase to send a 6-digit OTP code (not a magic link)
-      // when "Email OTP" is enabled in your Supabase project settings
+      emailRedirectTo: undefined,
     },
   })
   return { error: error?.message ?? null }
@@ -49,27 +35,32 @@ export async function sendEmailOTP(email: string): Promise<{ error: string | nul
 export async function verifyEmailOTP(
   email: string,
   token: string
-): Promise<{ error: string | null }> {
-  const { error } = await supabase.auth.verifyOtp({
+): Promise<{ error: string | null; userId: string | null }> {
+  const { data, error } = await supabase.auth.verifyOtp({
     email,
     token,
     type: 'email',
   })
+  return {
+    error: error?.message ?? null,
+    userId: data.user?.id ?? null,
+  }
+}
+
+export async function sendPasswordResetEmail(
+  email: string,
+  redirectTo: string
+): Promise<{ error: string | null }> {
+  const { error } = await supabase.auth.resetPasswordForEmail(email, {
+    redirectTo,
+  })
   return { error: error?.message ?? null }
 }
 
-/**
- * Send a password reset email.
- * The link redirects to VITE_APP_URL/reset-password#access_token=...
- * which our ResetPassword page handles.
- */
-export async function sendPasswordResetEmail(
-  email: string
+export async function updatePassword(
+  newPassword: string
 ): Promise<{ error: string | null }> {
-  const appUrl = import.meta.env.VITE_APP_URL as string || window.location.origin
-  const { error } = await supabase.auth.resetPasswordForEmail(email, {
-    redirectTo: `${appUrl}/reset-password`,
-  })
+  const { error } = await supabase.auth.updateUser({ password: newPassword })
   return { error: error?.message ?? null }
 }
 
@@ -82,139 +73,234 @@ export async function getCurrentUser() {
   return data.user
 }
 
-export async function getSpacesWithKeys(accountId: string): Promise
-  Array<{
-    id:                  string
-    name:                string
-    creator_id:          string
-    allow_member_invite: boolean
-    created_at:          string
-    encrypted_space_key: string
-    iv:                  string
-  }>> {
-  const { data, error } = await supabase
-    .from('space_members')
-    .select(`
-      encrypted_space_key,
-      iv,
-      spaces (
-        id,
-        name,
-        creator_id,
-        allow_member_invite,
-        created_at
-      )
-    `)
-    .eq('account_id', accountId)
-
-  if (error || !data) return []
-
-  return data
-    .filter((row) => row.spaces !== null)
-    .map((row) => {
-      const space = row.spaces as {
-        id: string
-        name: string
-        creator_id: string
-        allow_member_invite: boolean
-        created_at: string
-      }
-      return {
-        id:                  space.id,
-        name:                space.name,
-        creator_id:          space.creator_id,
-        allow_member_invite: space.allow_member_invite,
-        created_at:          space.created_at,
-        encrypted_space_key: row.encrypted_space_key,
-        iv:                  row.iv,
-      }
-    })
+export async function getSession() {
+  const { data } = await supabase.auth.getSession()
+  return data.session
 }
 
-export async function createSpaceInSupabase(
-  name: string,
-  creatorId: string,
-  encryptedSpaceKey: string,
-  iv: string,
-  allowMemberInvite = false
-): Promise<{ spaceId: string | null; error: string | null }> {
-  const spaceId = crypto.randomUUID()
-
-  const { error: spaceErr } = await supabase.from('spaces').insert({
-    id:                  spaceId,
-    name,
-    creator_id:          creatorId,
-    allow_member_invite: allowMemberInvite,
-  })
-  if (spaceErr) return { spaceId: null, error: spaceErr.message }
-
-  const { error: memberErr } = await supabase.from('space_members').insert({
-    space_id:            spaceId,
-    account_id:          creatorId,
-    role:                'creator',
-    encrypted_space_key: encryptedSpaceKey,
-    iv,
-  })
-  if (memberErr) return { spaceId: null, error: memberErr.message }
-
-  return { spaceId, error: null }
-}
+// ---- Clip sync ----
 
 export function subscribeToClips(
   accountId: string,
   spaceId: string | null,
   onInsert: (clip: Record<string, unknown>) => void,
   onDelete: (clipId: string) => void
-) {
-  const channel = spaceId
-    ? `clips:space:${spaceId}`
-    : `clips:personal:${accountId}`
+): RealtimeChannel {
+  const channelName = spaceId
+    ? 'clips:space:' + spaceId
+    : 'clips:personal:' + accountId
+
+  const filter = spaceId
+    ? 'space_id=eq.' + spaceId
+    : 'account_id=eq.' + accountId + '&space_id=is.null'
 
   return supabase
-    .channel(channel)
+    .channel(channelName)
     .on(
       'postgres_changes',
-      {
-        event:  'INSERT',
-        schema: 'public',
-        table:  'clips',
-        filter: spaceId
-          ? `space_id=eq.${spaceId}`
-          : `account_id=eq.${accountId}`,
-      },
-      (payload) => {
-        const row = payload.new as Record<string, unknown>
-        if (!spaceId && row['space_id'] !== null) return
-        onInsert(row)
-      }
+      { event: 'INSERT', schema: 'public', table: 'clips', filter },
+      (payload) => onInsert(payload.new as Record<string, unknown>)
     )
     .on(
       'postgres_changes',
-      {
-        event:  'DELETE',
-        schema: 'public',
-        table:  'clips',
-      },
+      { event: 'DELETE', schema: 'public', table: 'clips' },
       (payload) => onDelete((payload.old as { id: string }).id)
     )
     .subscribe()
 }
 
+// ---- Space sync ----
+
 export function subscribeToSpaceInvites(
   spaceId: string,
   onPending: (invite: Record<string, unknown>) => void
-) {
+): RealtimeChannel {
   return supabase
-    .channel(`invites:${spaceId}`)
+    .channel('invites:' + spaceId)
     .on(
       'postgres_changes',
-      {
-        event:  'INSERT',
-        schema: 'public',
-        table:  'space_invites',
-        filter: `space_id=eq.${spaceId}`,
-      },
+      { event: 'INSERT', schema: 'public', table: 'space_invites', filter: 'space_id=eq.' + spaceId },
       (payload) => onPending(payload.new as Record<string, unknown>)
     )
     .subscribe()
+}
+
+export function subscribeToSpaceMembers(
+  spaceId: string,
+  onUpdate: (member: Record<string, unknown>) => void
+): RealtimeChannel {
+  return supabase
+    .channel('members:' + spaceId)
+    .on(
+      'postgres_changes',
+      { event: 'UPDATE', schema: 'public', table: 'space_members', filter: 'space_id=eq.' + spaceId },
+      (payload) => onUpdate(payload.new as Record<string, unknown>)
+    )
+    .subscribe()
+}
+
+// ---- Space CRUD ----
+
+export interface SpaceRow {
+  id: string
+  name: string
+  creator_id: string
+  allow_member_invite: boolean
+  created_at: string
+}
+
+export async function createSpace(
+  name: string,
+  creatorId: string
+): Promise<{ data: SpaceRow | null; error: string | null }> {
+  const { data, error } = await supabase
+    .from('spaces')
+    .insert({ name, creator_id: creatorId, allow_member_invite: false })
+    .select()
+    .single()
+  return { data: data as SpaceRow | null, error: error?.message ?? null }
+}
+
+export async function getSpacesForUser(userId: string): Promise<SpaceRow[]> {
+  const { data: memberships } = await supabase
+    .from('space_members')
+    .select('space_id')
+    .eq('account_id', userId)
+
+  if (!memberships || memberships.length === 0) return []
+
+  const ids = memberships.map((m: { space_id: string }) => m.space_id)
+  const { data } = await supabase
+    .from('spaces')
+    .select('*')
+    .in('id', ids)
+
+  return (data as SpaceRow[]) ?? []
+}
+
+export async function addCreatorToSpace(
+  spaceId: string,
+  accountId: string,
+  encryptedSpaceKey: string,
+  iv: string
+): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('space_members')
+    .insert({
+      space_id: spaceId,
+      account_id: accountId,
+      role: 'creator',
+      encrypted_space_key: encryptedSpaceKey,
+      iv,
+    })
+  return { error: error?.message ?? null }
+}
+
+// ---- Invite CRUD ----
+
+export interface InviteRow {
+  id: string
+  space_id: string
+  created_by: string
+  token: string
+  expires_at: string
+  used_at: string | null
+  approved: boolean
+  approved_by: string | null
+}
+
+export async function createInvite(
+  spaceId: string,
+  createdBy: string,
+  isCreator: boolean
+): Promise<{ token: string | null; error: string | null }> {
+  const token = crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '')
+  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+
+  const { error } = await supabase
+    .from('space_invites')
+    .insert({
+      id: crypto.randomUUID(),
+      space_id: spaceId,
+      created_by: createdBy,
+      token,
+      expires_at: expiresAt,
+      approved: isCreator,
+    })
+
+  return { token: error ? null : token, error: error?.message ?? null }
+}
+
+export async function getInviteByToken(token: string): Promise<{ data: InviteRow | null; error: string | null }> {
+  const { data, error } = await supabase
+    .from('space_invites')
+    .select('*')
+    .eq('token', token)
+    .single()
+  return { data: data as InviteRow | null, error: error?.message ?? null }
+}
+
+export async function markInviteUsed(inviteId: string): Promise<void> {
+  await supabase
+    .from('space_invites')
+    .update({ used_at: new Date().toISOString() })
+    .eq('id', inviteId)
+}
+
+export async function acceptInvite(
+  spaceId: string,
+  accountId: string
+): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('space_members')
+    .insert({
+      space_id: spaceId,
+      account_id: accountId,
+      role: 'member',
+      encrypted_space_key: '',
+      iv: '',
+    })
+  return { error: error?.message ?? null }
+}
+
+// ---- Clip CRUD ----
+
+export interface ClipRow {
+  id: string
+  account_id: string
+  space_id: string | null
+  type: string
+  preview: string
+  encrypted_content: string
+  iv: string
+  pinned: boolean
+  tags: string[]
+  wipe_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export async function upsertClipRemote(clip: ClipRow): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('clips')
+    .upsert({
+      id: clip.id,
+      account_id: clip.account_id,
+      space_id: clip.space_id,
+      type: clip.type,
+      preview: clip.preview,
+      encrypted_content: clip.encrypted_content,
+      iv: clip.iv,
+      pinned: clip.pinned,
+      tags: clip.tags,
+      wipe_at: clip.wipe_at,
+      created_at: clip.created_at,
+      updated_at: clip.updated_at,
+    })
+  return { error: error?.message ?? null }
+}
+
+export async function deleteClipRemote(clipId: string): Promise<{ error: string | null }> {
+  const { error } = await supabase.from('clips').delete().eq('id', clipId)
+  return { error: error?.message ?? null }
 }

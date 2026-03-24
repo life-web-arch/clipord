@@ -4,18 +4,18 @@ import QRCode from 'qrcode'
 import { Spinner } from '../ui/Spinner'
 
 interface Props {
-  email:       string
-  accountId:   string
-  onComplete:  (secret: string) => void
+  email:      string
+  accountId:  string
+  onComplete: (secret: string) => void
 }
 
 export function TOTPSetup({ email, accountId, onComplete }: Props) {
-  const [secret, setSecret]     = useState('')
-  const [qrUrl, setQrUrl]       = useState('')
-  const [code, setCode]         = useState('')
-  const [error, setError]       = useState<string | null>(null)
-  const [loading, setLoading]   = useState(false)
-  const [copied, setCopied]     = useState(false)
+  const [secret, setSecret]   = useState('')
+  const [qrUrl, setQrUrl]     = useState('')
+  const [code, setCode]       = useState('')
+  const [error, setError]     = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [copied, setCopied]   = useState(false)
 
   useEffect(() => {
     const totp = new OTPAuth.TOTP({
@@ -46,6 +46,10 @@ export function TOTPSetup({ email, accountId, onComplete }: Props) {
     if (delta === null) {
       setError('Invalid code. Make sure your authenticator app time is correct.')
     } else {
+      // Store plaintext copy for the browser extension popup (which cannot
+      // derive the PBKDF2 account key needed to decrypt the encrypted copy).
+      // The main app will also encrypt this secret via storeTOTPSecret in
+      // App.tsx › handleTOTPSetupComplete.
       localStorage.setItem(`clipord_totp_${accountId}`, secret)
       onComplete(secret)
     }
@@ -93,7 +97,7 @@ export function TOTPSetup({ email, accountId, onComplete }: Props) {
           </div>
         )}
 
-        <p className="text-white/40 text-sm mb-3">Enter the 6-digit code from your app</p>
+        <p className="text-white/40 text-sm mb-3">Enter the 6-digit code from your app to confirm</p>
         <input
           type="text"
           value={code}

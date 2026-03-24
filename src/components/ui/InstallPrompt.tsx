@@ -1,50 +1,61 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { isIOS, isPWA } from '@shared/platform'
 
 export function InstallPrompt() {
-  const [showPrompt, setShowPrompt]     = useState(false)
-  const [isIOSDevice, setIsIOSDevice]   = useState(false)
-  const [dismissed, setDismissed]       = useState(false)
+  const [show, setShow]           = useState(false)
+  const [isIOSDevice, setIsIOS]   = useState(false)
+  const hasPrompt                 = useRef(false)
 
   useEffect(() => {
-    // Don't show if already installed as PWA
     if (isPWA()) return
-    // Don't show if dismissed this session
     if (sessionStorage.getItem('clipord_install_dismissed')) return
 
     const ios = isIOS()
-    setIsIOSDevice(ios)
+    setIsIOS(ios)
 
     if (ios) {
-      // iOS: always show install instructions (no beforeinstallprompt on iOS)
-      setTimeout(() => setShowPrompt(true), 3000)
-    } else {
-      // Android/Desktop: show when install event fires
-      const handler = () => setShowPrompt(true)
-      window.addEventListener('clipord:install-available', handler)
-      return () => window.removeEventListener('clipord:install-available', handler)
+      // iOS: always show after 4s (no beforeinstallprompt available)
+      const t = setTimeout(() => setShow(true), 4000)
+      return () => clearTimeout(t)
     }
+
+    // Check if prompt already captured before component mounted
+    import('../../src/main').then(({ getInstallPrompt }) => {
+      if (getInstallPrompt()) {
+        hasPrompt.current = true
+        setShow(true)
+      }
+    }).catch(() => {})
+
+    // Also listen for future fires
+    const handler = () => {
+      hasPrompt.current = true
+      setShow(true)
+    }
+    window.addEventListener('clipord:install-available', handler)
+    return () => window.removeEventListener('clipord:install-available', handler)
   }, [])
 
   const handleInstall = async () => {
-    const { getInstallPrompt, clearInstallPrompt } = await import('../../main')
-    const prompt = getInstallPrompt()
-    if (!prompt) return
-    await prompt.prompt()
-    const { outcome } = await prompt.userChoice
-    if (outcome === 'accepted') {
-      clearInstallPrompt()
-      setShowPrompt(false)
-    }
+    try {
+      const { getInstallPrompt, clearInstallPrompt } = await import('../../src/main')
+      const prompt = getInstallPrompt()
+      if (!prompt) return
+      await prompt.prompt()
+      const { outcome } = await prompt.userChoice
+      if (outcome === 'accepted') {
+        clearInstallPrompt()
+        setShow(false)
+      }
+    } catch { /* */ }
   }
 
-  const handleDismiss = () => {
-    setDismissed(true)
-    setShowPrompt(false)
+  const dismiss = () => {
+    setShow(false)
     sessionStorage.setItem('clipord_install_dismissed', '1')
   }
 
-  if (!showPrompt || dismissed) return null
+  if (!show) return null
 
   return (
     <div className="fixed bottom-4 left-4 right-4 z-50 animate-slide-up">
@@ -57,28 +68,25 @@ export function InstallPrompt() {
             <p className="text-white font-semibold text-sm">Install Clipord</p>
             {isIOSDevice ? (
               <p className="text-white/50 text-xs mt-1">
-                Tap <span className="text-clipord-400">Share</span> then{' '}
-                <span className="text-clipord-400">Add to Home Screen</span> for the best experience
+                Tap <span className="text-clipord-300">Share ↑</span> then{' '}
+                <span className="text-clipord-300">Add to Home Screen</span>
               </p>
             ) : (
               <p className="text-white/50 text-xs mt-1">
-                Add to your home screen for instant access and offline support
+                Add to home screen for instant access and offline use
               </p>
             )}
           </div>
           <button
-            onClick={handleDismiss}
-            className="text-white/30 hover:text-white/60 text-lg leading-none flex-shrink-0"
+            onClick={dismiss}
+            className="text-white/30 hover:text-white/60 text-xl leading-none flex-shrink-0 mt-0.5"
           >
             ×
           </button>
         </div>
         {!isIOSDevice && (
-          <button
-            onClick={handleInstall}
-            className="btn-primary w-full mt-3 text-sm py-2"
-          >
-            Install app
+          <button onClick={handleInstall} className="btn-primary w-full mt-3 text-sm py-2">
+            Install
           </button>
         )}
       </div>

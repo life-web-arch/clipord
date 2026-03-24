@@ -1,89 +1,65 @@
 import { useState, useEffect, useCallback } from 'react'
-import browser from 'webextension-polyfill'
 import * as OTPAuth from 'otpauth'
 import {
-  isSessionValid, setSession, clearSession,
-  getRemainingMs, isLockedOut, recordFailedAttempt,
-  clearBruteForce
+  isSessionValid,
+  setSession,
+  clearSession,
+  getRemainingMs,
+  isLockedOut,
+  recordFailedAttempt,
+  clearBruteForce,
 } from '../lib/session'
-import { loadEncryptedClips, clearEncryptedClips, saveEncryptedClips } from '../lib/extensionCrypto'
-import { detectClipType, generatePreview, getClipTypeIcon } from '@shared/detector'
-import { Spinner } from '../../src/components/ui/Spinner'
-import type { ClipType } from '@shared/types'
-
-interface StoredAccount { id: string; email: string }
-
-// Extension clips include type + preview so the popup can display them
-// without decrypting (decryption happens only on copy).
-interface Clip {
-  id:        string
-  content:   string
-  type:      ClipType
-  preview:   string
-  spaceId:   string | null
-  accountId: string
-  createdAt: string
-}
+import {
+  getExtAccounts,
+} from '../lib/authBridge'
+import {
+  loadClipsEncrypted,
+  deleteClipEncrypted,
+} from '../lib/extensionCrypto'
+import type { StoredClip } from '../lib/extensionCrypto'
+import type { ExtAccountRecord } from '@shared/types'
+import { detectClipType, getClipTypeIcon, generatePreview } from '@shared/detector'
 
 type PopupStep = 'account-select' | 'verify' | 'clips'
 
-// Read the TOTP secret from localStorage, supporting both the encrypted
-// (clipord_totp_enc_<id>) and legacy plaintext (clipord_totp_<id>) formats.
-// The popup cannot derive the account key (it needs the passphrase / PBKDF2
-// which is only available in the main app), so we fall back to plaintext only.
-// If the main app has already migrated the secret to the encrypted format,
-// we can only read it here by decrypting with the extension storage key —
-// which the popup does not hold.  We therefore keep supporting the plaintext
-// key as a popup-accessible copy alongside the encrypted one.
-//
-// The main app writes BOTH keys:
-//   clipord_totp_<id>         → plaintext (extension-accessible fallback)
-//   clipord_totp_enc_<id>     → encrypted  (main app reads this)
-//
-// See shared/crypto.ts storeTOTPSecret — patched below via TOTPSetup fix.
-function readTOTPSecret(accountId: string): string | null {
-  // Prefer plaintext copy kept for the extension
-  const plain = localStorage.getItem(`clipord_totp_${accountId}`)
-  if (plain) return plain
-  // Legacy encrypted blob — we cannot decrypt here, signal to user
-  return null
-}
-
 export function Popup() {
-  const [step, setStep]                         = useState<PopupStep>('account-select')
-  const [accounts, setAccounts]                 = useState<StoredAccount[]>([])
-  const [activeAccount, setActiveAccount]       = useState<StoredAccount | null>(null)
-  const [clips, setClips]                       = useState<Clip[]>([])
-  const [code, setCode]                         = useState('')
-  const [error, setError]                       = useState<string | null>(null)
-  const [loading, setLoading]                   = useState(false)
-  const [copied, setCopied]                     = useState<string | null>(null)
-  const [sessionRemaining, setSessionRemaining] = useState(0)
-  const [attemptsLeft, setAttemptsLeft]         = useState(5)
-  const [lockoutMs, setLockoutMs]               = useState(0)
+  const [step, setStep]                   = useState<PopupStep>('account-select')
+  const [accounts, setAccounts]           = useState<ExtAccountRecord[]>([])
+  const [activeAccount, setActiveAccount] = useState<ExtAccountRecord | null>(null)
+  const [clips, setClips]                 = useState<StoredClip[]>([])
+  const [code, setCode]                   = useState('')
+  const [error, setError]                 = useState<string | null>(null)
+  const [loading, setLoading]             = useState(false)
+  const [copied, setCopied]               = useState<string | null>(null)
+  const [remainingMs, setRemainingMs]     = useState(0)
+  const [attemptsLeft, setAttemptsLeft]   = useState(5)
+  const [lockoutMs, setLockoutMs]         = useState(0)
+  const [loadingAccounts, setLoadingAccounts] = useState(true)
 
   // Load accounts on mount
   useEffect(() => {
-    browser.storage.local.get('clipord_accounts').then((result) => {
-      const accs = (result.clipord_accounts as StoredAccount[] | undefined) ?? []
+    getExtAccounts().then((accs) => {
       setAccounts(accs)
+      setLoadingAccounts(false)
     })
   }, [])
 
-  // Session countdown
+  // Session timer countdown
   useEffect(() => {
     if (step !== 'clips') return
-    const interval = setInterval(() => {
-      const remaining = getRemainingMs()
-      setSessionRemaining(remaining)
-      if (remaining <= 0) {
-        clearSession()
-        setStep('account-select')
-        setClips([])
+    const interval = setInterval(async () => {
+      const remaining = await getRemainingMs()
+      setRemainingMs(remaining)
+      if (remaining <= 0 && activeAccount) {
+        const valid = await isSessionValid(activeAccount.id)
+        if (!valid) {
+          setStep('account-select')
+          setClips([])
+        }
       }
     }, 10_000)
     return () => clearInterval(interval)
-  }, [step])
+  }, [step, activeAccount])
 
   // Lockout countdown
   useEffect(() => {
@@ -91,41 +67,53 @@ export function Popup() {
     const interval = setInterval(() => {
       setLockoutMs((prev) => {
         const next = prev - 1000
-        if (next <= 0) { setError(null); clearInterval(interval); return 0 }
-        setError(`Locked. Try again in ${Math.ceil(next / 60000)}m.`)
+        if (next <= 0) { setError(null); return 0 }
+        setError('Locked. Try again in ' + Math.ceil(next / 60000) + 'm.')
         return next
       })
     }, 1000)
     return () => clearInterval(interval)
   }, [lockoutMs])
 
-  const handleSelectAccount = (account: StoredAccount) => {
+  const handleSelectAccount = useCallback(async (account: ExtAccountRecord) => {
     setActiveAccount(account)
-    if (isSessionValid(account.id)) {
-      loadClips(account)
+    setError(null)
+    setCode('')
+
+    // Check existing session
+    const valid = await isSessionValid(account.id)
+    if (valid) {
+      const loaded = await loadClipsEncrypted(account.id)
+      setClips([...loaded].reverse())
+      const remaining = await getRemainingMs()
+      setRemainingMs(remaining)
       setStep('clips')
       return
     }
-    const lockCheck = isLockedOut(account.id)
+
+    // Check lockout
+    const lockCheck = await isLockedOut(account.id)
     if (lockCheck.locked) {
       setLockoutMs(lockCheck.remainingMs)
-      setError(`Locked. Try again in ${Math.ceil(lockCheck.remainingMs / 60000)}m.`)
+      setError('Locked. Try again in ' + Math.ceil(lockCheck.remainingMs / 60000) + 'm.')
     }
-    setStep('verify')
-  }
 
-  const handleVerify = async () => {
+    setStep('verify')
+  }, [])
+
+  const handleVerify = useCallback(async () => {
     if (!activeAccount || !code || code.length < 6) return
-    const lockCheck = isLockedOut(activeAccount.id)
+
+    const lockCheck = await isLockedOut(activeAccount.id)
     if (lockCheck.locked) return
 
     setLoading(true)
     setError(null)
 
     try {
-      const secret = readTOTPSecret(activeAccount.id)
+      const secret = activeAccount.totpSecret
       if (!secret) {
-        setError('Authenticator not set up. Open the Clipord app on this device first.')
+        setError('Authenticator not configured. Sign in via the Clipord web app first.')
         setLoading(false)
         return
       }
@@ -142,75 +130,84 @@ export function Popup() {
       const delta = totp.validate({ token: code, window: 1 })
 
       if (delta === null) {
-        const result = recordFailedAttempt(activeAccount.id)
+        const result = await recordFailedAttempt(activeAccount.id)
         if (result.lockedOut) {
-          setLockoutMs(result.lockedUntilMs! - Date.now())
+          const ms = result.lockedUntilMs! - Date.now()
+          setLockoutMs(ms)
           setError('Too many attempts. Locked for 15 minutes.')
         } else {
           setAttemptsLeft(result.attemptsLeft)
-          setError(
-            `Incorrect code. ${result.attemptsLeft} attempt${result.attemptsLeft !== 1 ? 's' : ''} left.`
-          )
+          setError('Incorrect code. ' + result.attemptsLeft + ' attempt' + (result.attemptsLeft !== 1 ? 's' : '') + ' left.')
         }
       } else {
-        clearBruteForce(activeAccount.id)
-        setSession(activeAccount.id)
-        await loadClips(activeAccount)
+        await clearBruteForce(activeAccount.id)
+        await setSession(activeAccount.id)
+        const loaded = await loadClipsEncrypted(activeAccount.id)
+        setClips([...loaded].reverse())
+        const remaining = await getRemainingMs()
+        setRemainingMs(remaining)
         setStep('clips')
       }
-    } catch {
-      setError('Verification failed.')
+    } catch (e) {
+      setError('Verification error. Please try again.')
     }
 
     setCode('')
     setLoading(false)
-  }
+  }, [activeAccount, code])
 
-  const loadClips = async (account: StoredAccount) => {
-    const loaded = await loadEncryptedClips(account.id)
-    // Reverse so newest is first; re-hydrate type+preview if missing
-    const hydrated = (loaded as Clip[]).map((c) => ({
-      ...c,
-      type:    c.type    ?? detectClipType(c.content),
-      preview: c.preview ?? generatePreview(c.content, 60),
-    }))
-    setClips(hydrated.slice().reverse())
-  }
-
-  const handleCopy = async (content: string, id: string) => {
+  const handleCopy = useCallback(async (content: string, id: string) => {
     await navigator.clipboard.writeText(content)
     setCopied(id)
+    if (activeAccount) await refreshSession()
     setTimeout(() => setCopied(null), 2000)
-  }
+  }, [activeAccount])
 
-  const handleDelete = async (id: string) => {
+  const refreshSession = async () => {
     if (!activeAccount) return
-    const updated = clips.filter((c) => c.id !== id)
-    setClips(updated)
-    await clearEncryptedClips(activeAccount.id)
-    await saveEncryptedClips(activeAccount.id, updated.slice().reverse())
+    const { refreshSession: rs } = await import('../lib/session')
+    await rs(activeAccount.id)
+    const remaining = await getRemainingMs()
+    setRemainingMs(remaining)
   }
 
-  const handleLock = () => {
-    clearSession()
+  const handleDelete = useCallback(async (id: string) => {
+    if (!activeAccount) return
+    await deleteClipEncrypted(activeAccount.id, id)
+    setClips((prev) => prev.filter((c) => c.id !== id))
+  }, [activeAccount])
+
+  const handleLock = useCallback(async () => {
+    await clearSession()
     setClips([])
     setStep('account-select')
     setCode('')
     setError(null)
+    setActiveAccount(null)
+  }, [])
+
+  const openApp = () => {
+    chrome.tabs.create({ url: 'https://clipord.app' })
   }
 
-  const openApp = () => browser.tabs.create({ url: 'https://clipord.app' })
-
-  const formatRemaining = (ms: number) => {
-    const mins = Math.floor(ms / 60000)
-    const secs = Math.floor((ms % 60000) / 1000)
-    return `${mins}:${secs.toString().padStart(2, '0')}`
+  const formatTime = (ms: number) => {
+    const m = Math.floor(ms / 60000)
+    const s = Math.floor((ms % 60000) / 1000)
+    return m + ':' + String(s).padStart(2, '0')
   }
 
-  // ---- Render: account select ----
+  // ---- Account select ----
+  if (loadingAccounts) {
+    return (
+      <div className="w-72 bg-dark-0 text-white p-6 flex items-center justify-center">
+        <div className="w-5 h-5 border-2 border-clipord-500 border-t-transparent rounded-full animate-spin" />
+      </div>
+    )
+  }
+
   if (step === 'account-select') {
     return (
-      <div className="w-80 bg-dark-0 text-white font-sans">
+      <div className="w-72 bg-dark-0 text-white font-sans" style={{ minHeight: '200px' }}>
         <div className="flex items-center justify-between px-4 py-3 border-b border-dark-200">
           <div className="flex items-center gap-2">
             <span>📋</span>
@@ -223,8 +220,14 @@ export function Popup() {
         <div className="p-3 space-y-2">
           {accounts.length === 0 ? (
             <div className="py-8 text-center">
-              <p className="text-white/30 text-xs">No accounts. Open Clipord app to sign in.</p>
-              <button onClick={openApp} className="btn-primary mt-4 text-sm px-6">Open app</button>
+              <p className="text-white/30 text-xs mb-3">No accounts found.</p>
+              <p className="text-white/20 text-xs mb-4">Sign in via the Clipord web app first.</p>
+              <button
+                onClick={openApp}
+                className="bg-clipord-600 text-white text-sm px-4 py-2 rounded-xl hover:bg-clipord-500"
+              >
+                Open Clipord
+              </button>
             </div>
           ) : (
             accounts.map((acc) => (
@@ -240,9 +243,7 @@ export function Popup() {
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="text-white text-sm font-medium truncate">{acc.email}</p>
-                  <p className="text-white/30 text-xs">
-                    {isSessionValid(acc.id) ? '✓ Active session' : 'Tap to verify'}
-                  </p>
+                  <p className="text-white/30 text-xs">Tap to verify</p>
                 </div>
                 <span className="text-white/20">›</span>
               </button>
@@ -253,22 +254,24 @@ export function Popup() {
     )
   }
 
-  // ---- Render: TOTP verify ----
+  // ---- TOTP verify ----
   if (step === 'verify' && activeAccount) {
     const locked = lockoutMs > 0
     return (
-      <div className="w-80 bg-dark-0 text-white font-sans">
+      <div className="w-72 bg-dark-0 text-white font-sans">
         <div className="flex items-center gap-2 px-4 py-3 border-b border-dark-200">
           <button
-            onClick={() => { setStep('account-select'); setError(null) }}
+            onClick={() => { setStep('account-select'); setError(null); setActiveAccount(null) }}
             className="text-white/40 hover:text-white/60 text-sm"
-          >←</button>
+          >
+            ←
+          </button>
           <span className="text-sm font-medium flex-1 truncate">{activeAccount.email}</span>
         </div>
         <div className="p-4">
           <div className="text-center mb-4">
-            <span className="text-3xl">{locked ? '🔒' : '🔑'}</span>
-            <p className="text-white/50 text-xs mt-2">Enter authenticator code</p>
+            <div className="text-3xl mb-2">{locked ? '🔒' : '🔑'}</div>
+            <p className="text-white/40 text-xs">Enter authenticator code</p>
           </div>
           {error && (
             <div className="bg-red-500/10 border border-red-500/30 rounded-xl px-3 py-2 mb-3">
@@ -283,7 +286,7 @@ export function Popup() {
                 onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
                 onKeyDown={(e) => e.key === 'Enter' && handleVerify()}
                 placeholder="000000"
-                className="input-field text-center text-xl tracking-[0.4em] font-mono mb-3"
+                className="w-full bg-dark-100 border border-dark-300 rounded-xl px-4 py-3 text-white text-center text-xl tracking-[0.4em] font-mono focus:outline-none focus:border-clipord-500 mb-3"
                 inputMode="numeric"
                 maxLength={6}
                 autoFocus
@@ -292,9 +295,9 @@ export function Popup() {
               <button
                 onClick={handleVerify}
                 disabled={loading || code.length < 6}
-                className="btn-primary w-full flex items-center justify-center gap-2 text-sm"
+                className="w-full bg-clipord-600 hover:bg-clipord-500 disabled:opacity-50 text-white text-sm font-medium py-2.5 rounded-xl transition-colors"
               >
-                {loading ? <Spinner size="sm" /> : 'Verify'}
+                {loading ? 'Verifying…' : 'Verify'}
               </button>
               {attemptsLeft < 5 && (
                 <p className="text-yellow-400/70 text-xs text-center mt-2">
@@ -308,18 +311,18 @@ export function Popup() {
     )
   }
 
-  // ---- Render: clips list ----
+  // ---- Clips view ----
   if (step === 'clips' && activeAccount) {
     return (
-      <div className="w-80 bg-dark-0 text-white font-sans">
+      <div className="w-72 bg-dark-0 text-white font-sans">
         <div className="flex items-center justify-between px-4 py-3 border-b border-dark-200">
           <div className="flex items-center gap-2">
-            <span>📋</span>
+            <span className="text-sm">📋</span>
             <span className="font-bold text-sm">Clipord</span>
           </div>
           <div className="flex items-center gap-2">
-            {sessionRemaining > 0 && (
-              <span className="text-white/20 text-xs">{formatRemaining(sessionRemaining)}</span>
+            {remainingMs > 0 && (
+              <span className="text-white/20 text-xs" title="Session expires in">{formatTime(remainingMs)}</span>
             )}
             <button
               onClick={handleLock}
@@ -327,48 +330,59 @@ export function Popup() {
             >
               Lock
             </button>
-            <button onClick={openApp} className="text-clipord-400 hover:text-clipord-300 text-xs">
+            <button onClick={openApp} className="text-clipord-400 text-xs hover:text-clipord-300">
               App →
             </button>
           </div>
         </div>
 
-        <div className="overflow-y-auto max-h-96">
+        <div style={{ maxHeight: '360px', overflowY: 'auto' }}>
           {clips.length === 0 ? (
             <div className="py-10 text-center">
-              <p className="text-white/30 text-xs">No clips saved yet</p>
+              <div className="text-3xl mb-2">📋</div>
+              <p className="text-white/30 text-xs">No clips yet</p>
+              <p className="text-white/20 text-xs mt-1">Copy something and save it via the toast</p>
             </div>
           ) : (
-            <div className="p-2 space-y-1">
-              {clips.map((clip) => (
-                <div
-                  key={clip.id}
-                  className="flex items-center gap-2 p-2 rounded-lg hover:bg-dark-100 group"
-                >
-                  <span className="text-base flex-shrink-0">{getClipTypeIcon(clip.type)}</span>
-                  <p className="flex-1 text-white/70 text-xs truncate">{clip.preview}</p>
-                  <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button
-                      onClick={() => handleCopy(clip.content, clip.id)}
-                      className={`text-xs px-2 py-1 rounded transition-all ${
-                        copied === clip.id
-                          ? 'text-green-400 bg-green-500/10'
-                          : 'text-clipord-400 bg-clipord-500/10 hover:bg-clipord-500/20'
-                      }`}
-                    >
-                      {copied === clip.id ? '✓' : 'Copy'}
-                    </button>
-                    <button
-                      onClick={() => handleDelete(clip.id)}
-                      className="text-xs px-2 py-1 rounded text-white/20 hover:text-red-400 hover:bg-red-500/10 transition-all"
-                    >
-                      🗑
-                    </button>
+            <div className="p-2 space-y-2">
+              {clips.map((clip) => {
+                const type    = detectClipType(clip.content)
+                const preview = generatePreview(clip.content, 60)
+                return (
+                  <div key={clip.id} className="bg-dark-100 rounded-xl p-3">
+                    <div className="flex items-start gap-2 mb-2">
+                      <span className="text-sm flex-shrink-0">{getClipTypeIcon(type)}</span>
+                      <p className="text-white/70 text-xs leading-relaxed flex-1 break-all"
+                         style={{ display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+                        {preview}
+                      </p>
+                    </div>
+                    <div className="flex gap-1.5">
+                      <button
+                        onClick={() => handleCopy(clip.content, clip.id)}
+                        className={'flex-1 py-1.5 rounded-lg text-xs font-medium transition-all ' +
+                          (copied === clip.id
+                            ? 'bg-green-500/20 text-green-400'
+                            : 'bg-clipord-600/20 text-clipord-400 hover:bg-clipord-600/30')}
+                      >
+                        {copied === clip.id ? '✓ Copied' : 'Copy'}
+                      </button>
+                      <button
+                        onClick={() => handleDelete(clip.id)}
+                        className="py-1.5 px-2 rounded-lg text-xs bg-dark-200 hover:bg-red-500/20 hover:text-red-400 transition-colors"
+                      >
+                        🗑
+                      </button>
+                    </div>
                   </div>
-                </div>
-              ))}
+                )
+              })}
             </div>
           )}
+        </div>
+
+        <div className="px-3 py-2 border-t border-dark-200">
+          <p className="text-white/20 text-xs truncate">👤 {activeAccount.email}</p>
         </div>
       </div>
     )

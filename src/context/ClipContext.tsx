@@ -1,108 +1,59 @@
-import React, { createContext, useContext, useState, useCallback, useEffect } from 'react'
+import React, { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react'
 import {
   db,
   getClipsForAccount,
   upsertClip,
   deleteClip,
-  getSpacesForAccount,
+  addToSyncQueue,
+  getPendingSyncItems,
+  removeSyncQueueItem,
+  getExpiredClips,
   upsertSpace,
-  upsertSpaceMember,
+  snakeToCamelClip,
+  camelToSnakeClip,
 } from '@shared/db'
-import {
-  decryptText,
-  encryptText,
-  generateSpaceKey,
-  encryptSpaceKey,
-  decryptSpaceKey,
-} from '@shared/crypto'
+import { encryptText, decryptText, generateSpaceKey, encryptSpaceKey } from '@shared/crypto'
 import { detectClipType, generatePreview } from '@shared/detector'
-import { getSpacesWithKeys, createSpaceInSupabase } from '@shared/supabase'
-import type { Clip, Space, CryptoKeys } from '@shared/types'
+import {
+  supabase,
+  subscribeToClips,
+  getSpacesWithKeys,
+  createSpaceInSupabase,
+  upsertClipRemote,
+  deleteClipRemote,
+} from '@shared/supabase'
+import type { Clip, Space } from '@shared/types'
 import { useAuth } from './AuthContext'
+import type { RealtimeChannel } from '@supabase/supabase-js'
 
 interface ClipContextValue {
-  clips:          Clip[]
-  spaces:         Space[]
-  activeSpaceId:  string | null
-  isLoading:      boolean
-  setActiveSpace: (spaceId: string | null) => void
-  saveClip:       (content: string, spaceId?: string | null) => Promise<void>
-  removeClip:     (clipId: string) => Promise<void>
-  pinClip:        (clipId: string, pinned: boolean) => Promise<void>
-  decryptClip:    (clip: Clip) => Promise<string>
-  refreshClips:   () => Promise<void>
-  createSpace:    (name: string) => Promise<void>
+  clips:           Clip[]
+  spaces:          Space[]
+  activeSpaceId:   string | null
+  isLoading:       boolean
+  setActiveSpace:  (spaceId: string | null) => void
+  saveClip:        (content: string, spaceId?: string | null) => Promise<void>
+  removeClip:      (clipId: string) => Promise<void>
+  pinClip:         (clipId: string, pinned: boolean) => Promise<void>
+  tagClip:         (clipId: string, tags: string[]) => Promise<void>
+  setWipeTimer:    (clipId: string, wipeAt: string | null) => Promise<void>
+  decryptClip:     (clip: Clip) => Promise<string>
+  refreshClips:    () => Promise<void>
+  createSpace:     (name: string) => Promise<void>
 }
 
 const ClipContext = createContext<ClipContextValue | null>(null)
 
 export function ClipProvider({ children }: { children: React.ReactNode }) {
   const { activeAccount, cryptoKeys, setCryptoKeys } = useAuth()
-  const [clips, setClips]                 = useState<Clip[]>([])
-  const [spaces, setSpaces]               = useState<Space[]>([])
+  const [clips, setClips]               = useState<Clip[]>([])
+  const [spaces, setSpaces]             = useState<Space[]>([])
   const [activeSpaceId, setActiveSpaceId] = useState<string | null>(null)
-  const [isLoading, setIsLoading]         = useState(false)
+  const [isLoading, setIsLoading]       = useState(false)
+  const channelRef                      = useRef<RealtimeChannel | null>(null)
+  const wipeTimerRef                    = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  // ---- Load and decrypt space keys ----
-  const loadSpaces = useCallback(async (keys: CryptoKeys) => {
-    if (!activeAccount) return keys
-
-    // 1. Try local DB first (offline-first)
-    const localSpaces = await getSpacesForAccount(activeAccount.id)
-
-    // 2. Fetch from Supabase (includes encrypted_space_key per membership row)
-    let remoteRows: Awaited<ReturnType<typeof getSpacesWithKeys>> = []
-    try {
-      remoteRows = await getSpacesWithKeys(activeAccount.id)
-    } catch {
-      // Offline — use local data only
-    }
-
-    // 3. Merge remote into local DB and decrypt space keys
-    const updatedSpaceKeys: Record<string, CryptoKey> = { ...keys.spaceKeys }
-
-    for (const row of remoteRows) {
-      const space: Space = {
-        id:                row.id,
-        name:              row.name,
-        creatorId:         row.creator_id,
-        allowMemberInvite: row.allow_member_invite,
-        encryptedSpaceKey: row.encrypted_space_key,
-        iv:                row.iv,
-        createdAt:         row.created_at,
-      }
-      await upsertSpace(space)
-
-      // Decrypt the space key using the account key
-      try {
-        const spaceKey = await decryptSpaceKey(
-          row.encrypted_space_key,
-          row.iv,
-          keys.accountKey
-        )
-        updatedSpaceKeys[row.id] = spaceKey
-      } catch {
-        console.error(`Failed to decrypt space key for space ${row.id}`)
-      }
-    }
-
-    const newKeys: CryptoKeys = { accountKey: keys.accountKey, spaceKeys: updatedSpaceKeys }
-
-    // Only call setCryptoKeys if space keys actually changed to avoid loops
-    if (Object.keys(updatedSpaceKeys).length !== Object.keys(keys.spaceKeys).length) {
-      setCryptoKeys(newKeys)
-    }
-
-    // 4. Refresh space list from local DB (now updated)
-    const allSpaces = await getSpacesForAccount(activeAccount.id)
-    // Merge any local-only spaces that might not be on remote yet
-    const merged = allSpaces.length > 0 ? allSpaces : localSpaces
-    setSpaces(merged)
-
-    return newKeys
-  }, [activeAccount, setCryptoKeys])
-
-  // ---- Load clips ----
+  // Load clips from local DB
   const refreshClips = useCallback(async () => {
     if (!activeAccount) return
     setIsLoading(true)
@@ -111,36 +62,119 @@ export function ClipProvider({ children }: { children: React.ReactNode }) {
     setIsLoading(false)
   }, [activeAccount, activeSpaceId])
 
-  // ---- Bootstrap on account/keys change ----
-  useEffect(() => {
+  // Load spaces from Supabase and populate spaceKeys in cryptoKeys
+  const loadSpaces = useCallback(async () => {
     if (!activeAccount || !cryptoKeys) return
-    loadSpaces(cryptoKeys).then(() => refreshClips())
-  }, [activeAccount, cryptoKeys]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ---- Reload clips when active space changes ----
-  useEffect(() => {
-    refreshClips()
-  }, [refreshClips])
-
-  // ---- Listen for create-space custom event from Sidebar / extension ----
-  useEffect(() => {
-    const handler = async (e: Event) => {
-      const name = (e as CustomEvent<{ name: string }>).detail.name
-      if (name) await createSpace(name)
+    const { spaces: fetched, spaceKeys } = await getSpacesWithKeys(
+      activeAccount.id,
+      cryptoKeys.accountKey
+    )
+    // Persist spaces locally
+    for (const space of fetched) {
+      await upsertSpace(space)
     }
-    window.addEventListener('clipord:create-space', handler)
-    return () => window.removeEventListener('clipord:create-space', handler)
-  }) // eslint-disable-line react-hooks/exhaustive-deps
+    setSpaces(fetched)
+    // Merge space keys into crypto keys
+    setCryptoKeys({
+      accountKey: cryptoKeys.accountKey,
+      spaceKeys:  { ...cryptoKeys.spaceKeys, ...spaceKeys },
+    })
+  }, [activeAccount, cryptoKeys?.accountKey])
 
-  // ---- Save a clip ----
+  useEffect(() => { refreshClips() }, [refreshClips])
+  useEffect(() => { loadSpaces() }, [loadSpaces])
+
+  // Real-time sync
+  useEffect(() => {
+    if (!activeAccount) return
+    channelRef.current?.unsubscribe()
+
+    channelRef.current = subscribeToClips(
+      activeAccount.id,
+      activeSpaceId,
+      async (row) => {
+        const clip = snakeToCamelClip(row)
+        await upsertClip(clip)
+        setClips((prev) => {
+          const exists = prev.find((c) => c.id === clip.id)
+          if (exists) return prev.map((c) => c.id === clip.id ? clip : c)
+          return [clip, ...prev].sort((a, b) => {
+            if (a.pinned && !b.pinned) return -1
+            if (!a.pinned && b.pinned) return 1
+            return b.createdAt.localeCompare(a.createdAt)
+          })
+        })
+      },
+      async (row) => {
+        const clip = snakeToCamelClip(row)
+        await upsertClip(clip)
+        setClips((prev) => prev.map((c) => c.id === clip.id ? clip : c))
+      },
+      async (clipId) => {
+        await deleteClip(clipId)
+        setClips((prev) => prev.filter((c) => c.id !== clipId))
+      }
+    )
+
+    return () => { channelRef.current?.unsubscribe() }
+  }, [activeAccount, activeSpaceId])
+
+  // Offline sync queue processor
+  const processSyncQueue = useCallback(async () => {
+    if (!navigator.onLine) return
+    const items = await getPendingSyncItems()
+    for (const item of items) {
+      let success = false
+      try {
+        if (item.operation === 'insert' || item.operation === 'update') {
+          const { error } = await upsertClipRemote(item.payload)
+          success = !error
+          if (error) console.warn('Sync upsert failed:', error)
+        } else if (item.operation === 'delete') {
+          const { error } = await deleteClipRemote(item.payload['id'] as string)
+          success = !error
+          if (error) console.warn('Sync delete failed:', error)
+        }
+      } catch (e) {
+        console.warn('Sync error:', e)
+      }
+      // Only remove from queue if successfully synced
+      if (success) await removeSyncQueueItem(item.id)
+    }
+  }, [])
+
+  useEffect(() => {
+    const onOnline = () => processSyncQueue()
+    window.addEventListener('online', onOnline)
+    if (navigator.onLine) processSyncQueue()
+    return () => window.removeEventListener('online', onOnline)
+  }, [processSyncQueue])
+
+  // Wipe timer — check every minute for expired clips
+  useEffect(() => {
+    const checkWipes = async () => {
+      const expired = await getExpiredClips()
+      for (const clip of expired) {
+        await deleteClip(clip.id)
+        await deleteClipRemote(clip.id)
+        setClips((prev) => prev.filter((c) => c.id !== clip.id))
+      }
+    }
+    checkWipes()
+    wipeTimerRef.current = setInterval(checkWipes, 60_000)
+    return () => {
+      if (wipeTimerRef.current) clearInterval(wipeTimerRef.current)
+    }
+  }, [])
+
+  // Save clip — local + queue for sync
   const saveClip = useCallback(async (content: string, spaceId: string | null = null) => {
     if (!activeAccount || !cryptoKeys) return
     const key = spaceId ? cryptoKeys.spaceKeys[spaceId] : cryptoKeys.accountKey
-    if (!key) {
-      console.error('No encryption key available for space', spaceId)
-      return
-    }
+    if (!key) { console.error('No key for clip'); return }
+
     const { ciphertext, iv } = await encryptText(content, key)
+    const now = new Date().toISOString()
     const clip: Clip = {
       id:               crypto.randomUUID(),
       accountId:        activeAccount.id,
@@ -152,62 +186,111 @@ export function ClipProvider({ children }: { children: React.ReactNode }) {
       pinned:           false,
       tags:             [],
       wipeAt:           null,
-      createdAt:        new Date().toISOString(),
-      updatedAt:        new Date().toISOString(),
+      createdAt:        now,
+      updatedAt:        now,
       synced:           false,
     }
+
+    // Save locally first (optimistic)
     await upsertClip(clip)
     setClips((prev) => [clip, ...prev])
-  }, [activeAccount, cryptoKeys])
 
-  // ---- Remove a clip ----
+    // Queue for remote sync
+    await addToSyncQueue({
+      operation: 'insert',
+      table:     'clips',
+      payload:   camelToSnakeClip(clip),
+      createdAt: now,
+    })
+
+    // Attempt immediate sync
+    processSyncQueue()
+  }, [activeAccount, cryptoKeys, processSyncQueue])
+
+  // Remove clip — local + sync
   const removeClip = useCallback(async (clipId: string) => {
     await deleteClip(clipId)
     setClips((prev) => prev.filter((c) => c.id !== clipId))
-  }, [])
+    await addToSyncQueue({
+      operation: 'delete',
+      table:     'clips',
+      payload:   { id: clipId },
+      createdAt: new Date().toISOString(),
+    })
+    processSyncQueue()
+  }, [processSyncQueue])
 
-  // ---- Pin / unpin ----
+  // Pin clip
   const pinClip = useCallback(async (clipId: string, pinned: boolean) => {
     const clip = await db.clips.get(clipId)
     if (!clip) return
-    const updated = { ...clip, pinned, updatedAt: new Date().toISOString() }
+    const updated: Clip = { ...clip, pinned, updatedAt: new Date().toISOString() }
     await upsertClip(updated)
-    setClips((prev) => prev.map((c) => (c.id === clipId ? updated : c)))
-  }, [])
+    setClips((prev) => prev.map((c) => c.id === clipId ? updated : c))
+    await addToSyncQueue({
+      operation: 'update',
+      table:     'clips',
+      payload:   camelToSnakeClip(updated),
+      createdAt: new Date().toISOString(),
+    })
+    processSyncQueue()
+  }, [processSyncQueue])
 
-  // ---- Decrypt a clip for display / copy ----
+  // Tag clip
+  const tagClip = useCallback(async (clipId: string, tags: string[]) => {
+    const clip = await db.clips.get(clipId)
+    if (!clip) return
+    const updated: Clip = { ...clip, tags, updatedAt: new Date().toISOString() }
+    await upsertClip(updated)
+    setClips((prev) => prev.map((c) => c.id === clipId ? updated : c))
+    await addToSyncQueue({
+      operation: 'update',
+      table:     'clips',
+      payload:   camelToSnakeClip(updated),
+      createdAt: new Date().toISOString(),
+    })
+    processSyncQueue()
+  }, [processSyncQueue])
+
+  // Set wipe timer
+  const setWipeTimer = useCallback(async (clipId: string, wipeAt: string | null) => {
+    const clip = await db.clips.get(clipId)
+    if (!clip) return
+    const updated: Clip = { ...clip, wipeAt, updatedAt: new Date().toISOString() }
+    await upsertClip(updated)
+    setClips((prev) => prev.map((c) => c.id === clipId ? updated : c))
+    await addToSyncQueue({
+      operation: 'update',
+      table:     'clips',
+      payload:   camelToSnakeClip(updated),
+      createdAt: new Date().toISOString(),
+    })
+    processSyncQueue()
+  }, [processSyncQueue])
+
+  // Decrypt a clip
   const decryptClip = useCallback(async (clip: Clip): Promise<string> => {
     if (!cryptoKeys) throw new Error('No crypto keys')
     const key = clip.spaceId ? cryptoKeys.spaceKeys[clip.spaceId] : cryptoKeys.accountKey
-    if (!key) throw new Error('No key available for this clip')
+    if (!key) throw new Error('No key for clip')
     return decryptText(clip.encryptedContent, clip.iv, key)
   }, [cryptoKeys])
 
-  // ---- Create a new shared space ----
+  // Create a new shared space
   const createSpace = useCallback(async (name: string) => {
     if (!activeAccount || !cryptoKeys) return
-
-    // Generate a new random AES key for the space
     const spaceKey = await generateSpaceKey()
-
-    // Encrypt the space key with the account key so it can be stored
     const { encryptedSpaceKey, iv } = await encryptSpaceKey(spaceKey, cryptoKeys.accountKey)
 
-    // Persist to Supabase
     const { spaceId, error } = await createSpaceInSupabase(
       name,
       activeAccount.id,
       encryptedSpaceKey,
       iv
     )
-    if (error || !spaceId) {
-      console.error('Failed to create space:', error)
-      return
-    }
 
-    const now = new Date().toISOString()
+    if (error || !spaceId) { console.error('Create space failed:', error); return }
 
-    // Persist locally
     const space: Space = {
       id:                spaceId,
       name,
@@ -215,26 +298,15 @@ export function ClipProvider({ children }: { children: React.ReactNode }) {
       allowMemberInvite: false,
       encryptedSpaceKey,
       iv,
-      createdAt:         now,
+      createdAt:         new Date().toISOString(),
     }
-    await upsertSpace(space)
-    await upsertSpaceMember({
-      spaceId,
-      accountId:          activeAccount.id,
-      role:               'creator',
-      encryptedSpaceKey,
-      iv,
-      joinedAt:           now,
-    })
 
-    // Update in-memory space keys
-    const newKeys: CryptoKeys = {
+    await upsertSpace(space)
+    setSpaces((prev) => [...prev, space])
+    setCryptoKeys({
       accountKey: cryptoKeys.accountKey,
       spaceKeys:  { ...cryptoKeys.spaceKeys, [spaceId]: spaceKey },
-    }
-    setCryptoKeys(newKeys)
-
-    setSpaces((prev) => [...prev, space])
+    })
   }, [activeAccount, cryptoKeys, setCryptoKeys])
 
   return (
@@ -247,6 +319,8 @@ export function ClipProvider({ children }: { children: React.ReactNode }) {
       saveClip,
       removeClip,
       pinClip,
+      tagClip,
+      setWipeTimer,
       decryptClip,
       refreshClips,
       createSpace,

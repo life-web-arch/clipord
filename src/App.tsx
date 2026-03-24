@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Routes, Route, useNavigate, useLocation } from 'react-router-dom'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import { ClipProvider } from './context/ClipContext'
@@ -17,9 +17,15 @@ import {
   bufToBase64,
   base64ToBuf,
   storeTOTPSecret,
+  getOrCreateSalt,
 } from '@shared/crypto'
 import { upsertDeviceSettings } from '@shared/db'
 import { getDeviceId } from '@shared/platform'
+import {
+  supabase,
+  fetchSaltFromServer,
+  saveSaltToServer,
+} from '@shared/supabase'
 import type { Account, CryptoKeys } from '@shared/types'
 
 type AuthStep =
@@ -32,19 +38,58 @@ type AuthStep =
   | 'locked'
   | 'app'
 
-// ---- Invite accept page (inside authenticated shell) ----
-function InviteAccept() {
-  const { isVerified } = useAuth()
-  const location = useLocation()
-  const navigate = useNavigate()
-  const token = location.pathname.split('/invite/')[1] ?? ''
-  const [status, setStatus] = useState<'pending' | 'accepted' | 'error'>('pending')
+// ---- Intent handler — scrubs URL after processing ----
+function IntentHandler() {
+  const location    = useLocation()
+  const navigate    = useNavigate()
+  const { createSpace } = useClipsOrNull()
+  const handled     = useRef(false)
 
   useEffect(() => {
-    if (!isVerified || !token) return
+    if (handled.current) return
+    const params = new URLSearchParams(location.search)
+    const intent  = params.get('intent')
+    if (intent === 'create-space') {
+      const name = params.get('name')
+      if (name && createSpace) {
+        handled.current = true
+        createSpace(decodeURIComponent(name)).then(() => {
+          // Scrub URL to prevent re-trigger on refresh
+          navigate('/', { replace: true })
+        })
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  return null
+}
+
+// Safe hook that returns null if outside ClipProvider
+function useClipsOrNull() {
+  try {
+    const { createSpace } = require('./context/ClipContext').useClips()
+    return { createSpace }
+  } catch {
+    return { createSpace: null }
+  }
+}
+
+// ---- Invite accept page ----
+function InviteAccept() {
+  const { isVerified, activeAccount } = useAuth()
+  const navigate                      = useNavigate()
+  const location                      = useLocation()
+  const token                         = location.pathname.split('/invite/')[1] ?? ''
+  const [status, setStatus]           = useState<'pending' | 'accepted' | 'error'>('pending')
+
+  useEffect(() => {
+    if (!isVerified || !activeAccount || !token) {
+      if (!isVerified) setStatus('error')
+      return
+    }
     const accept = async () => {
       try {
-        const { supabase } = await import('@shared/supabase')
         const { data: invite, error: inviteErr } = await supabase
           .from('space_invites')
           .select('*')
@@ -52,23 +97,30 @@ function InviteAccept() {
           .single()
 
         if (inviteErr || !invite) { setStatus('error'); return }
-        if (invite.used_at) { setStatus('error'); return }
+        if (invite.used_at)       { setStatus('error'); return }
         if (new Date(invite.expires_at) < new Date()) { setStatus('error'); return }
 
+        // Mark invite as used
         await supabase
           .from('space_invites')
           .update({ used_at: new Date().toISOString() })
           .eq('id', invite.id)
 
-        await supabase
+        // Add the ACCEPTING user — not the creator
+        const { error: memberErr } = await supabase
           .from('space_members')
           .insert({
             space_id:            invite.space_id,
-            account_id:          invite.created_by,
+            account_id:          activeAccount.id,  // ← fixed: the person accepting
             role:                'member',
             encrypted_space_key: '',
             iv:                  '',
           })
+
+        if (memberErr && !memberErr.message.includes('duplicate')) {
+          setStatus('error')
+          return
+        }
 
         setStatus('accepted')
       } catch {
@@ -76,7 +128,7 @@ function InviteAccept() {
       }
     }
     accept()
-  }, [token, isVerified])
+  }, [token, isVerified, activeAccount])
 
   return (
     <div className="min-h-screen bg-dark-0 flex items-center justify-center px-6">
@@ -92,7 +144,8 @@ function InviteAccept() {
             <div className="text-4xl mb-4">✅</div>
             <p className="text-white font-semibold mb-2">Invite accepted!</p>
             <p className="text-white/40 text-sm mb-6">
-              The space creator will approve your request.
+              The space creator will share the encryption key with you.
+              You'll see the space once approved.
             </p>
             <button onClick={() => navigate('/')} className="btn-primary px-6 py-2.5">
               Go to app
@@ -116,22 +169,6 @@ function InviteAccept() {
   )
 }
 
-// ---- Intent handler (e.g. from extension create-space) ----
-function IntentHandler() {
-  const location = useLocation()
-  useEffect(() => {
-    const params = new URLSearchParams(location.search)
-    const intent = params.get('intent')
-    if (intent === 'create-space') {
-      const name = params.get('name')
-      if (name) {
-        window.dispatchEvent(new CustomEvent('clipord:create-space', { detail: { name } }))
-      }
-    }
-  }, [location])
-  return null
-}
-
 // ---- Main auth state machine ----
 function AppInner() {
   const {
@@ -144,9 +181,8 @@ function AppInner() {
   const [pendingEmail, setPendingEmail]   = useState('')
   const [pendingUserId, setPendingUserId] = useState('')
   const [cryptoKeyRef, setCryptoKeyRef]   = useState<CryptoKey | null>(null)
-  const location = useLocation()
+  const location                          = useLocation()
 
-  // React to lock state
   useEffect(() => {
     if (isLocked && step === 'app') setStep('locked')
   }, [isLocked, step])
@@ -155,14 +191,16 @@ function AppInner() {
     if (accounts.length === 0) setStep('switcher')
   }, [accounts])
 
+  /**
+   * Derive the account encryption key using a salt that is synced across devices
+   * via Supabase user metadata. This ensures the SAME key is produced on every device.
+   */
   const unlockAccount = async (account: Account): Promise<CryptoKey> => {
-    const saltKey = 'clipord_salt_' + account.id
-    let saltStr   = localStorage.getItem(saltKey)
-    if (!saltStr) {
-      saltStr = bufToBase64(generateSalt())
-      localStorage.setItem(saltKey, saltStr)
-    }
-    const salt       = base64ToBuf(saltStr)
+    const salt = await getOrCreateSalt(
+      account.id,
+      fetchSaltFromServer,
+      saveSaltToServer
+    )
     const accountKey = await deriveKeyFromPassphrase(account.id, salt)
     const keys: CryptoKeys = { accountKey, spaceKeys: {} }
     setCryptoKeys(keys)
@@ -214,6 +252,8 @@ function AppInner() {
     await setActiveAccount(account)
     const accountKey = await unlockAccount(account)
     await storeTOTPSecret(account.id, secret, accountKey)
+    // Also save plaintext for extension bridge (stored separately)
+    localStorage.setItem('clipord_totp_' + account.id, secret)
     setStep('app')
   }
 
@@ -229,9 +269,7 @@ function AppInner() {
     setStep('app')
   }
 
-  // ---- Render ----
-
-  // Reset password page — always accessible regardless of auth state
+  // Always show reset password page regardless of auth
   if (location.pathname === '/reset-password') {
     return <ResetPassword />
   }
@@ -245,9 +283,9 @@ function AppInner() {
       <ClipProvider>
         <IntentHandler />
         <Routes>
-          <Route path="/*" element={<MainApp />} />
-          <Route path="/invite/:token" element={<InviteAccept />} />
-          <Route path="/reset-password" element={<ResetPassword />} />
+          <Route path="/*"                element={<MainApp />} />
+          <Route path="/invite/:token"    element={<InviteAccept />} />
+          <Route path="/reset-password"   element={<ResetPassword />} />
         </Routes>
       </ClipProvider>
     )
@@ -263,12 +301,7 @@ function AppInner() {
   }
 
   if (step === 'add-account-email') {
-    return (
-      <EmailOTP
-        onVerified={handleEmailVerified}
-        onBack={() => setStep('switcher')}
-      />
-    )
+    return <EmailOTP onVerified={handleEmailVerified} onBack={() => setStep('switcher')} />
   }
 
   if (step === 'totp-setup' && pendingEmail && pendingUserId) {
@@ -327,7 +360,7 @@ export default function App() {
     <AuthProvider>
       <Routes>
         <Route path="/reset-password" element={<ResetPassword />} />
-        <Route path="/*" element={<AppInner />} />
+        <Route path="/*"              element={<AppInner />} />
       </Routes>
     </AuthProvider>
   )

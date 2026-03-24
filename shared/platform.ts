@@ -1,28 +1,19 @@
 export type Platform = 'ios' | 'android' | 'desktop' | 'extension'
 
 export function detectPlatform(): Platform {
-  if (typeof chrome !== 'undefined' && chrome.runtime?.id) return 'extension'
+  if (typeof chrome !== 'undefined' && typeof chrome.runtime !== 'undefined' && chrome.runtime.id) {
+    return 'extension'
+  }
   const ua = navigator.userAgent.toLowerCase()
-  if (/iphone|ipad|ipod/.test(ua))  return 'ios'
-  if (/android/.test(ua))           return 'android'
+  if (/iphone|ipad|ipod/.test(ua)) return 'ios'
+  if (/android/.test(ua))          return 'android'
   return 'desktop'
 }
 
-export function isIOS(): boolean {
-  return detectPlatform() === 'ios'
-}
-
-export function isAndroid(): boolean {
-  return detectPlatform() === 'android'
-}
-
-export function isDesktop(): boolean {
-  return detectPlatform() === 'desktop'
-}
-
-export function isExtension(): boolean {
-  return detectPlatform() === 'extension'
-}
+export function isIOS(): boolean     { return detectPlatform() === 'ios' }
+export function isAndroid(): boolean { return detectPlatform() === 'android' }
+export function isDesktop(): boolean { return detectPlatform() === 'desktop' }
+export function isExtension(): boolean { return detectPlatform() === 'extension' }
 
 export function isPWA(): boolean {
   return (
@@ -32,8 +23,10 @@ export function isPWA(): boolean {
 }
 
 export function supportsBiometric(): boolean {
-  return typeof PublicKeyCredential !== 'undefined' &&
+  return (
+    typeof PublicKeyCredential !== 'undefined' &&
     typeof PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable === 'function'
+  )
 }
 
 export function supportsWebPush(): boolean {
@@ -49,12 +42,24 @@ export function supportsShareTarget(): boolean {
 }
 
 export function supportsClipboardRead(): boolean {
-  return navigator.clipboard !== undefined &&
+  return (
+    typeof navigator !== 'undefined' &&
+    navigator.clipboard !== undefined &&
     typeof navigator.clipboard.readText === 'function'
+  )
 }
 
+/**
+ * Get or generate a stable device ID.
+ * Safe to call in both PWA (localStorage) and extension (must use browser.storage).
+ * In extension context, call getExtensionDeviceId() instead.
+ */
 export function getDeviceId(): string {
   const key = 'clipord_device_id'
+  // Guard against Service Worker / extension context where localStorage is unavailable
+  if (typeof localStorage === 'undefined') {
+    return 'ext-device-' + Math.random().toString(36).slice(2)
+  }
   let id = localStorage.getItem(key)
   if (!id) {
     id = crypto.randomUUID()

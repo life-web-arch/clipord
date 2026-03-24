@@ -9,25 +9,25 @@ export default defineConfig({
     viteStaticCopy({
       targets: [
         { src: 'extension/manifest.json', dest: '.' },
-        { src: 'extension/icons/*', dest: 'icons' },
-        { src: 'public/icons/*', dest: 'icons' },
+        { src: 'extension/icons/*',       dest: 'icons' },
+        { src: 'public/icons/*',          dest: 'icons' },
       ],
     }),
   ],
   resolve: {
     alias: {
       '@shared': resolve(__dirname, 'shared'),
-      '@': resolve(__dirname, 'src'),
+      '@':       resolve(__dirname, 'src'),
     },
   },
   build: {
-    outDir: 'dist/extension',
+    outDir:     'dist/extension',
     emptyOutDir: true,
     rollupOptions: {
       input: {
-        popup:      resolve(__dirname, 'extension/popup/popup.html'),
-        background: resolve(__dirname, 'extension/background/service-worker.ts'),
-        content:    resolve(__dirname, 'extension/content/content.ts'),
+        'popup-entry': resolve(__dirname, 'extension/popup/popup-entry.tsx'),
+        background:    resolve(__dirname, 'extension/background/service-worker.ts'),
+        content:       resolve(__dirname, 'extension/content/content.ts'),
       },
       output: {
         entryFileNames: '[name].js',

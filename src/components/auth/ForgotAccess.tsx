@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import * as OTPAuth from 'otpauth'
+import { TOTP, Secret } from 'otpauth' // <-- CORRECT, NAMED IMPORT
 import { sendPasswordResetEmail } from '@shared/supabase'
 import { retrieveTOTPSecret } from '@shared/crypto'
 import { Spinner } from '../ui/Spinner'
@@ -31,10 +31,10 @@ export function ForgotAccess({ accountId, email, cryptoKey, onRecovered, onBack 
       }
       if (!secret) { setError('No authenticator configured for this account'); setLoading(false); return }
 
-      const totp = new OTPAuth.TOTP({
+      const totp = new TOTP({
         issuer: 'Clipord', label: email, algorithm: 'SHA1',
         digits: 6, period: 30,
-        secret: OTPAuth.Secret.fromBase32(secret),
+        secret: Secret.fromBase32(secret), // <-- CORRECT USAGE
       })
       const delta = totp.validate({ token: code, window: 1 })
       if (delta === null) {

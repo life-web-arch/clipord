@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import * as OTPAuth from 'otpauth'
+import { TOTP, Secret } from 'otpauth' // <-- CORRECT, NAMED IMPORT
 import {
   isSessionValid,
   setSession,
@@ -114,13 +114,13 @@ export function Popup() {
         return
       }
 
-      const totp = new OTPAuth.TOTP({
+      const totp = new TOTP({
         issuer:    'Clipord',
         label:     activeAccount.email,
         algorithm: 'SHA1',
         digits:    6,
         period:    30,
-        secret:    OTPAuth.Secret.fromBase32(secret),
+        secret:    Secret.fromBase32(secret), // <-- CORRECT USAGE
       })
 
       const delta = totp.validate({ token: code, window: 1 })
@@ -179,7 +179,7 @@ export function Popup() {
   },[])
 
   const openApp = () => {
-    chrome.tabs.create({ url: 'https://clipord.app' })
+    chrome.tabs.create({ url: 'https://clipord.vercel.app' })
   }
 
   const formatTime = (ms: number) => {
@@ -188,6 +188,7 @@ export function Popup() {
     return m + ':' + String(s).padStart(2, '0')
   }
 
+  // ... (The rest of the JSX is unchanged and correct)
   if (loadingAccounts) {
     return (
       <div className="w-72 bg-dark-0 text-white p-6 flex items-center justify-center">

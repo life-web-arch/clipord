@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import * as OTPAuth from 'otpauth'
+import { TOTP, Secret } from 'otpauth' // <-- CORRECT, NAMED IMPORT
 import QRCode from 'qrcode'
 import { Spinner } from '../ui/Spinner'
 
@@ -18,13 +18,14 @@ export function TOTPSetup({ email, accountId, onComplete }: Props) {
   const [copied, setCopied]   = useState(false)
 
   useEffect(() => {
-    const totp = new OTPAuth.TOTP({
+    // Use the direct imports now
+    const totp = new TOTP({
       issuer:    'Clipord',
       label:     email,
       algorithm: 'SHA1',
       digits:    6,
       period:    30,
-      secret:    OTPAuth.Secret.generate(32),
+      secret:    Secret.generate(32), // <-- CORRECT USAGE
     })
     const secretStr = totp.secret.base32
     setSecret(secretStr)
@@ -34,22 +35,18 @@ export function TOTPSetup({ email, accountId, onComplete }: Props) {
   const handleVerify = async () => {
     setLoading(true)
     setError(null)
-    const totp = new OTPAuth.TOTP({
+    const totp = new TOTP({
       issuer:    'Clipord',
       label:     email,
       algorithm: 'SHA1',
       digits:    6,
       period:    30,
-      secret:    OTPAuth.Secret.fromBase32(secret),
+      secret:    Secret.fromBase32(secret), // <-- CORRECT USAGE
     })
     const delta = totp.validate({ token: code, window: 1 })
     if (delta === null) {
       setError('Invalid code. Make sure your authenticator app time is correct.')
     } else {
-      // Store plaintext copy for the browser extension popup (which cannot
-      // derive the PBKDF2 account key needed to decrypt the encrypted copy).
-      // The main app will also encrypt this secret via storeTOTPSecret in
-      // App.tsx › handleTOTPSetupComplete.
       localStorage.setItem(`clipord_totp_${accountId}`, secret)
       onComplete(secret)
     }

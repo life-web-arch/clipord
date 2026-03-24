@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import * as OTPAuth from 'otpauth'
+import { TOTP, Secret } from 'otpauth' // <-- CORRECT, NAMED IMPORT
 import { checkLockout, recordFailure, recordSuccess, formatLockoutTime } from '../../lib/bruteForce'
 import { retrieveTOTPSecret } from '@shared/crypto'
 import { Spinner } from '../ui/Spinner'
@@ -28,7 +28,6 @@ export function TOTPVerify({ accountId, email, cryptoKey, onVerified, onForgot }
     setAttemptsLeft(left)
   }, [accountId])
 
-  // Countdown timer for lockout
   useEffect(() => {
     if (lockoutMs <= 0) return
     const interval = setInterval(() => {
@@ -55,12 +54,10 @@ export function TOTPVerify({ accountId, email, cryptoKey, onVerified, onForgot }
     setError(null)
 
     try {
-      // Retrieve encrypted TOTP secret
       let secret: string | null = null
       if (cryptoKey) {
         secret = await retrieveTOTPSecret(accountId, cryptoKey)
       } else {
-        // Fallback to legacy plaintext (will be migrated on next unlock with key)
         secret = localStorage.getItem(`clipord_totp_${accountId}`)
       }
 
@@ -70,10 +67,10 @@ export function TOTPVerify({ accountId, email, cryptoKey, onVerified, onForgot }
         return
       }
 
-      const totp = new OTPAuth.TOTP({
+      const totp = new TOTP({
         issuer: 'Clipord', label: email, algorithm: 'SHA1',
         digits: 6, period: 30,
-        secret: OTPAuth.Secret.fromBase32(secret),
+        secret: Secret.fromBase32(secret), // <-- CORRECT USAGE
       })
 
       const delta = totp.validate({ token: code, window: 1 })

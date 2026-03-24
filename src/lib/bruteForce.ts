@@ -10,20 +10,32 @@ interface BFRecord {
   lastAttempt: number
 }
 
+// Safe localStorage wrapper for cross-environment compatibility
+function getStorage() {
+  if (typeof localStorage !== 'undefined') return localStorage;
+  return null;
+}
+
 function getKey(accountId: string): string {
   return `${BF_KEY_PREFIX}${accountId}`
 }
 
 function load(accountId: string): BFRecord {
-  try {
-    const raw = localStorage.getItem(getKey(accountId))
-    if (raw) return JSON.parse(raw)
-  } catch { /* */ }
+  const storage = getStorage();
+  if (storage) {
+    try {
+      const raw = storage.getItem(getKey(accountId))
+      if (raw) return JSON.parse(raw)
+    } catch { /* */ }
+  }
   return { attempts: 0, lockedUntil: null, lastAttempt: 0 }
 }
 
 function save(accountId: string, record: BFRecord): void {
-  localStorage.setItem(getKey(accountId), JSON.stringify(record))
+  const storage = getStorage();
+  if (storage) {
+    storage.setItem(getKey(accountId), JSON.stringify(record))
+  }
 }
 
 export function checkLockout(accountId: string): {
@@ -72,7 +84,10 @@ export function recordFailure(accountId: string): {
 }
 
 export function recordSuccess(accountId: string): void {
-  localStorage.removeItem(getKey(accountId))
+  const storage = getStorage();
+  if (storage) {
+    storage.removeItem(getKey(accountId))
+  }
 }
 
 export function formatLockoutTime(ms: number): string {

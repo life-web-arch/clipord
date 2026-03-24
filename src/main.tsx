@@ -15,7 +15,6 @@ let _installPrompt: BeforeInstallPromptEvent | null = null
 export function getInstallPrompt(): BeforeInstallPromptEvent | null { return _installPrompt }
 export function clearInstallPrompt(): void { _installPrompt = null }
 
-// Capture install prompt as early as possible
 window.addEventListener('beforeinstallprompt', (e) => {
   e.preventDefault()
   _installPrompt = e as BeforeInstallPromptEvent
@@ -48,20 +47,15 @@ if ('serviceWorker' in navigator) {
 }
 
 // ---- Extension auth bridge ----
-// After login, sync account to extension storage so popup can auth.
-export async function bridgeAccountToExtension(
+// Safely dispatch cross-domain boundary custom event to be captured by Chrome extension content scripts
+export function bridgeAccountToExtension(
   accountId: string,
   email: string,
   totpSecret: string
-): Promise<void> {
-  // Only runs if extension is installed — detected by chrome.runtime
-  if (typeof chrome === 'undefined' || !chrome.runtime?.id) return
-  try {
-    const { syncAccountToExtension } = await import('../extension/lib/authBridge')
-    await syncAccountToExtension(accountId, email, totpSecret)
-  } catch {
-    // Extension not installed — silent fail
-  }
+): void {
+  window.dispatchEvent(new CustomEvent('clipord:sync-account', {
+    detail: { accountId, email, totpSecret }
+  }))
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(

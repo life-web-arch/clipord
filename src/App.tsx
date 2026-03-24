@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { Routes, Route, useNavigate, useLocation } from 'react-router-dom'
 import { AuthProvider, useAuth } from './context/AuthContext'
-import { ClipProvider } from './context/ClipContext'
+import { ClipProvider, useClipsSafe } from './context/ClipContext'
 import { AccountSwitcher } from './components/auth/AccountSwitcher'
 import { EmailOTP } from './components/auth/EmailOTP'
 import { TOTPSetup } from './components/auth/TOTPSetup'
@@ -17,9 +17,9 @@ import {
   bufToBase64,
   base64ToBuf,
   storeTOTPSecret,
+  retrieveTOTPSecret,
   getOrCreateSalt,
 } from '@shared/crypto'
-import { upsertDeviceSettings } from '@shared/db'
 import { getDeviceId } from '@shared/platform'
 import {
   supabase,
@@ -27,6 +27,7 @@ import {
   saveSaltToServer,
 } from '@shared/supabase'
 import type { Account, CryptoKeys } from '@shared/types'
+import { bridgeAccountToExtension } from './main'
 
 type AuthStep =
   | 'switcher'
@@ -38,11 +39,10 @@ type AuthStep =
   | 'locked'
   | 'app'
 
-// ---- Intent handler — scrubs URL after processing ----
 function IntentHandler() {
   const location    = useLocation()
   const navigate    = useNavigate()
-  const { createSpace } = useClipsOrNull()
+  const clipCtx     = useClipsSafe()
   const handled     = useRef(false)
 
   useEffect(() => {
@@ -51,31 +51,18 @@ function IntentHandler() {
     const intent  = params.get('intent')
     if (intent === 'create-space') {
       const name = params.get('name')
-      if (name && createSpace) {
+      if (name && clipCtx?.createSpace) {
         handled.current = true
-        createSpace(decodeURIComponent(name)).then(() => {
-          // Scrub URL to prevent re-trigger on refresh
+        clipCtx.createSpace(decodeURIComponent(name)).then(() => {
           navigate('/', { replace: true })
         })
       }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [location, navigate, clipCtx])
 
   return null
 }
 
-// Safe hook that returns null if outside ClipProvider
-function useClipsOrNull() {
-  try {
-    const { createSpace } = require('./context/ClipContext').useClips()
-    return { createSpace }
-  } catch {
-    return { createSpace: null }
-  }
-}
-
-// ---- Invite accept page ----
 function InviteAccept() {
   const { isVerified, activeAccount } = useAuth()
   const navigate                      = useNavigate()
@@ -100,18 +87,16 @@ function InviteAccept() {
         if (invite.used_at)       { setStatus('error'); return }
         if (new Date(invite.expires_at) < new Date()) { setStatus('error'); return }
 
-        // Mark invite as used
         await supabase
           .from('space_invites')
           .update({ used_at: new Date().toISOString() })
           .eq('id', invite.id)
 
-        // Add the ACCEPTING user — not the creator
         const { error: memberErr } = await supabase
           .from('space_members')
           .insert({
             space_id:            invite.space_id,
-            account_id:          activeAccount.id,  // ← fixed: the person accepting
+            account_id:          activeAccount.id, 
             role:                'member',
             encrypted_space_key: '',
             iv:                  '',
@@ -128,7 +113,7 @@ function InviteAccept() {
       }
     }
     accept()
-  }, [token, isVerified, activeAccount])
+  },[token, isVerified, activeAccount])
 
   return (
     <div className="min-h-screen bg-dark-0 flex items-center justify-center px-6">
@@ -169,17 +154,16 @@ function InviteAccept() {
   )
 }
 
-// ---- Main auth state machine ----
 function AppInner() {
   const {
     accounts, activeAccount, deviceSettings,
     isVerified, isLocked,
-    setActiveAccount, setVerified, setCryptoKeys, addAccount,
+    setActiveAccount, setVerified, setCryptoKeys, addAccount, saveDeviceSettings
   } = useAuth()
 
   const [step, setStep]                   = useState<AuthStep>('switcher')
   const [pendingEmail, setPendingEmail]   = useState('')
-  const [pendingUserId, setPendingUserId] = useState('')
+  const[pendingUserId, setPendingUserId] = useState('')
   const [cryptoKeyRef, setCryptoKeyRef]   = useState<CryptoKey | null>(null)
   const location                          = useLocation()
 
@@ -191,10 +175,6 @@ function AppInner() {
     if (accounts.length === 0) setStep('switcher')
   }, [accounts])
 
-  /**
-   * Derive the account encryption key using a salt that is synced across devices
-   * via Supabase user metadata. This ensures the SAME key is produced on every device.
-   */
   const unlockAccount = async (account: Account): Promise<CryptoKey> => {
     const salt = await getOrCreateSalt(
       account.id,
@@ -202,19 +182,22 @@ function AppInner() {
       saveSaltToServer
     )
     const accountKey = await deriveKeyFromPassphrase(account.id, salt)
+    
+    // Bridge to extension if secret is available securely 
+    const secret = localStorage.getItem('clipord_totp_' + account.id) || await retrieveTOTPSecret(account.id, accountKey)
+    if (secret) {
+      bridgeAccountToExtension(account.id, account.email, secret)
+    }
+
     const keys: CryptoKeys = { accountKey, spaceKeys: {} }
     setCryptoKeys(keys)
     setCryptoKeyRef(accountKey)
     setVerified(true)
-    const deviceId = getDeviceId()
-    await upsertDeviceSettings({
-      accountId:           account.id,
-      deviceId,
-      verificationEnabled: deviceSettings?.verificationEnabled ?? true,
-      verificationMethod:  deviceSettings?.verificationMethod  ?? 'totp',
-      cacheWipeAfterDays:  deviceSettings?.cacheWipeAfterDays  ?? null,
-      lastActiveAt:        new Date().toISOString(),
+    
+    await saveDeviceSettings({
+      lastActiveAt: new Date().toISOString()
     })
+    
     return accountKey
   }
 
@@ -252,8 +235,10 @@ function AppInner() {
     await setActiveAccount(account)
     const accountKey = await unlockAccount(account)
     await storeTOTPSecret(account.id, secret, accountKey)
-    // Also save plaintext for extension bridge (stored separately)
+    
     localStorage.setItem('clipord_totp_' + account.id, secret)
+    bridgeAccountToExtension(account.id, account.email, secret)
+    
     setStep('app')
   }
 
@@ -269,7 +254,6 @@ function AppInner() {
     setStep('app')
   }
 
-  // Always show reset password page regardless of auth
   if (location.pathname === '/reset-password') {
     return <ResetPassword />
   }

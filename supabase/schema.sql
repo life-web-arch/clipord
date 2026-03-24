@@ -141,7 +141,14 @@ drop policy if exists "own push subscription" on push_subscriptions;
 create policy "own push subscription" on push_subscriptions
   for all using (account_id = auth.uid());
 
--- Realtime
-alter publication supabase_realtime add table clips;
-alter publication supabase_realtime add table space_invites;
-alter publication supabase_realtime add table space_members;
+-- Realtime Configuration (Robust handling for existing publication / tables)
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
+    CREATE PUBLICATION supabase_realtime;
+  END IF;
+END $$;
+
+DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE clips; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE space_invites; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE space_members; EXCEPTION WHEN duplicate_object THEN NULL; END $$;

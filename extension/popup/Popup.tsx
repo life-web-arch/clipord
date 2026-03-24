@@ -8,6 +8,7 @@ import {
   isLockedOut,
   recordFailedAttempt,
   clearBruteForce,
+  refreshSession,
 } from '../lib/session'
 import {
   getExtAccounts,
@@ -25,7 +26,7 @@ type PopupStep = 'account-select' | 'verify' | 'clips'
 export function Popup() {
   const [step, setStep]                   = useState<PopupStep>('account-select')
   const [accounts, setAccounts]           = useState<ExtAccountRecord[]>([])
-  const [activeAccount, setActiveAccount] = useState<ExtAccountRecord | null>(null)
+  const[activeAccount, setActiveAccount] = useState<ExtAccountRecord | null>(null)
   const [clips, setClips]                 = useState<StoredClip[]>([])
   const [code, setCode]                   = useState('')
   const [error, setError]                 = useState<string | null>(null)
@@ -33,18 +34,16 @@ export function Popup() {
   const [copied, setCopied]               = useState<string | null>(null)
   const [remainingMs, setRemainingMs]     = useState(0)
   const [attemptsLeft, setAttemptsLeft]   = useState(5)
-  const [lockoutMs, setLockoutMs]         = useState(0)
+  const[lockoutMs, setLockoutMs]         = useState(0)
   const [loadingAccounts, setLoadingAccounts] = useState(true)
 
-  // Load accounts on mount
   useEffect(() => {
     getExtAccounts().then((accs) => {
       setAccounts(accs)
       setLoadingAccounts(false)
     })
-  }, [])
+  },[])
 
-  // Session timer countdown
   useEffect(() => {
     if (step !== 'clips') return
     const interval = setInterval(async () => {
@@ -59,9 +58,8 @@ export function Popup() {
       }
     }, 10_000)
     return () => clearInterval(interval)
-  }, [step, activeAccount])
+  },[step, activeAccount])
 
-  // Lockout countdown
   useEffect(() => {
     if (lockoutMs <= 0) return
     const interval = setInterval(() => {
@@ -80,7 +78,6 @@ export function Popup() {
     setError(null)
     setCode('')
 
-    // Check existing session
     const valid = await isSessionValid(account.id)
     if (valid) {
       const loaded = await loadClipsEncrypted(account.id)
@@ -91,7 +88,6 @@ export function Popup() {
       return
     }
 
-    // Check lockout
     const lockCheck = await isLockedOut(account.id)
     if (lockCheck.locked) {
       setLockoutMs(lockCheck.remainingMs)
@@ -99,7 +95,7 @@ export function Popup() {
     }
 
     setStep('verify')
-  }, [])
+  },[])
 
   const handleVerify = useCallback(async () => {
     if (!activeAccount || !code || code.length < 6) return
@@ -159,17 +155,13 @@ export function Popup() {
   const handleCopy = useCallback(async (content: string, id: string) => {
     await navigator.clipboard.writeText(content)
     setCopied(id)
-    if (activeAccount) await refreshSession()
+    if (activeAccount) {
+      await refreshSession(activeAccount.id)
+      const remaining = await getRemainingMs()
+      setRemainingMs(remaining)
+    }
     setTimeout(() => setCopied(null), 2000)
   }, [activeAccount])
-
-  const refreshSession = async () => {
-    if (!activeAccount) return
-    const { refreshSession: rs } = await import('../lib/session')
-    await rs(activeAccount.id)
-    const remaining = await getRemainingMs()
-    setRemainingMs(remaining)
-  }
 
   const handleDelete = useCallback(async (id: string) => {
     if (!activeAccount) return
@@ -184,7 +176,7 @@ export function Popup() {
     setCode('')
     setError(null)
     setActiveAccount(null)
-  }, [])
+  },[])
 
   const openApp = () => {
     chrome.tabs.create({ url: 'https://clipord.app' })
@@ -196,7 +188,6 @@ export function Popup() {
     return m + ':' + String(s).padStart(2, '0')
   }
 
-  // ---- Account select ----
   if (loadingAccounts) {
     return (
       <div className="w-72 bg-dark-0 text-white p-6 flex items-center justify-center">
@@ -254,7 +245,6 @@ export function Popup() {
     )
   }
 
-  // ---- TOTP verify ----
   if (step === 'verify' && activeAccount) {
     const locked = lockoutMs > 0
     return (
@@ -311,7 +301,6 @@ export function Popup() {
     )
   }
 
-  // ---- Clips view ----
   if (step === 'clips' && activeAccount) {
     return (
       <div className="w-72 bg-dark-0 text-white font-sans">

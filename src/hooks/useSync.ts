@@ -10,22 +10,33 @@ export function useSync() {
   const { activeAccount } = useAuth()
   const { activeSpaceId, refreshClips } = useClips()
   const channelRef = useRef<RealtimeChannel | null>(null)
+  const isSyncingRef = useRef(false)
 
   const processSyncQueue = useCallback(async () => {
-    const items = await getPendingSyncItems()
-    for (const item of items) {
-      try {
-        if (item.operation === 'insert' || item.operation === 'update') {
-          await supabase.from(item.table).upsert(item.payload)
-        } else if (item.operation === 'delete') {
-          await supabase.from(item.table).delete().eq('id', item.payload.id)
+    // Prevent overlapping sync processes
+    if (isSyncingRef.current || !navigator.onLine) return
+    isSyncingRef.current = true
+
+    try {
+      const items = await getPendingSyncItems()
+      for (const item of items) {
+        try {
+          if (item.operation === 'insert' || item.operation === 'update') {
+            await supabase.from(item.table).upsert(item.payload)
+          } else if (item.operation === 'delete') {
+            await supabase.from(item.table).delete().eq('id', item.payload.id)
+          }
+          await removeSyncQueueItem(item.id)
+        } catch (err) {
+          console.warn('Individual sync item failed, will retry:', err)
+          // Break out of loop to preserve chronological order on failures
+          break
         }
-        await removeSyncQueueItem(item.id)
-      } catch {
-        // Will retry next sync cycle
       }
+    } finally {
+      isSyncingRef.current = false
     }
-  }, [])
+  },[])
 
   useEffect(() => {
     if (!activeAccount) return
@@ -52,13 +63,23 @@ export function useSync() {
     return () => {
       channelRef.current?.unsubscribe()
     }
-  }, [activeAccount, activeSpaceId, refreshClips])
+  },[activeAccount, activeSpaceId, refreshClips])
 
   useEffect(() => {
-    const onOnline = () => processSyncQueue()
+    // Throttled online listener
+    let syncTimeout: ReturnType<typeof setTimeout>
+    const onOnline = () => {
+      clearTimeout(syncTimeout)
+      syncTimeout = setTimeout(processSyncQueue, 1000)
+    }
+    
     window.addEventListener('online', onOnline)
     if (navigator.onLine) processSyncQueue()
-    return () => window.removeEventListener('online', onOnline)
+    
+    return () => {
+      window.removeEventListener('online', onOnline)
+      clearTimeout(syncTimeout)
+    }
   }, [processSyncQueue])
 
   useEffect(() => {
@@ -67,5 +88,5 @@ export function useSync() {
     }
     navigator.serviceWorker?.addEventListener('message', onMessage)
     return () => navigator.serviceWorker?.removeEventListener('message', onMessage)
-  }, [processSyncQueue])
+  },[processSyncQueue])
 }

@@ -1,15 +1,17 @@
-const CACHE_NAME = 'clipord-v2'
-const STATIC_ASSETS = [
+const CACHE_NAME = 'clipord-v3'
+const STATIC_ASSETS =[
   '/',
   '/index.html',
   '/manifest.json',
+  '/icons/icon-192.png',
+  '/icons/icon-512.png'
 ]
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
       return cache.addAll(STATIC_ASSETS).catch((err) => {
-        console.warn('SW: failed to cache some assets', err)
+        console.warn('SW: failed to cache some static assets', err)
       })
     })
   )
@@ -20,7 +22,9 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(
     Promise.all([
       caches.keys().then((keys) =>
-        Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)))
+        Promise.all(
+          keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k))
+        )
       ),
       self.clients.claim(),
     ])
@@ -31,11 +35,14 @@ self.addEventListener('fetch', (event) => {
   const { request } = event
   const url = new URL(request.url)
 
-  // Skip non-GET and API requests
+  // Skip non-GET requests and external API endpoints immediately
   if (request.method !== 'GET') return
   if (url.origin !== self.location.origin) {
-    // For cross-origin: only cache same-origin assets
-    if (url.href.includes('/rest/v1/') || url.href.includes('/realtime/')) return
+    return
+  }
+
+  // API and Realtime endpoints must bypass cache completely
+  if (url.pathname.startsWith('/rest/v1/') || url.pathname.startsWith('/realtime/')) {
     return
   }
 
@@ -44,7 +51,7 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(
       fetch(request)
         .then((response) => {
-          if (response && response.status === 200) {
+          if (response && response.status === 200 && response.type === 'basic') {
             const clone = response.clone()
             caches.open(CACHE_NAME).then((cache) => cache.put(request, clone))
           }
@@ -55,19 +62,20 @@ self.addEventListener('fetch', (event) => {
     return
   }
 
-  // Cache-first for static assets (JS, CSS, images)
-  if (
-    url.pathname.match(/\.(js|css|png|jpg|jpeg|svg|ico|woff2?|ttf)$/)
-  ) {
+  // Cache-first for static assets (JS, CSS, images) with robust error handling
+  if (url.pathname.match(/\.(js|css|png|jpg|jpeg|svg|ico|woff2?|ttf)$/)) {
     event.respondWith(
       caches.match(request).then((cached) => {
         if (cached) return cached
         return fetch(request).then((response) => {
-          if (response && response.status === 200) {
+          if (response && response.status === 200 && response.type === 'basic') {
             const clone = response.clone()
             caches.open(CACHE_NAME).then((cache) => cache.put(request, clone))
           }
           return response
+        }).catch((err) => {
+          console.warn('SW Fetch Error on static asset:', err)
+          return new Response('', { status: 408, statusText: 'Offline' })
         })
       })
     )
@@ -78,7 +86,7 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(
     caches.match(request).then((cached) => {
       const networkFetch = fetch(request).then((response) => {
-        if (response && response.status === 200) {
+        if (response && response.status === 200 && response.type === 'basic') {
           const clone = response.clone()
           caches.open(CACHE_NAME).then((cache) => cache.put(request, clone))
         }
@@ -92,7 +100,12 @@ self.addEventListener('fetch', (event) => {
 self.addEventListener('push', (event) => {
   if (!event.data) return
   let data = {}
-  try { data = event.data.json() } catch { data = { title: 'Clipord', body: event.data.text() } }
+  try { 
+    data = event.data.json() 
+  } catch { 
+    data = { title: 'Clipord', body: event.data.text() } 
+  }
+  
   event.waitUntil(
     self.registration.showNotification(data.title || 'Clipord', {
       body:    data.body || '',
@@ -101,7 +114,7 @@ self.addEventListener('push', (event) => {
       tag:     data.tag || 'clipord-notification',
       data:    data.url || '/',
       actions: data.actions || [],
-      vibrate: [100, 50, 100],
+      vibrate:[100, 50, 100],
     })
   )
 })

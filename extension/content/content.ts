@@ -15,12 +15,17 @@ browser.runtime.onMessage.addListener((message: Record<string, unknown>) => {
   }
 })
 
-// Listen for copy events — use synchronous clipboard read via execCommand
-// to avoid the async gesture requirement
+// Listen for sync account event from the PWA page context safely
+window.addEventListener('clipord:sync-account', ((e: CustomEvent) => {
+  if (e.detail) {
+    browser.runtime.sendMessage({
+      type: 'SYNC_ACCOUNT',
+      payload: e.detail,
+    }).catch(() => {})
+  }
+}) as EventListener)
+
 document.addEventListener('copy', () => {
-  // We don't read clipboard here — the background gets it via keyboard shortcut
-  // or context menu. For the automatic capture, we rely on the user explicitly
-  // triggering the save, which avoids all clipboard permission issues.
   browser.runtime.sendMessage({ type: 'COPY_EVENT_FIRED' }).catch(() => {})
 })
 
@@ -32,7 +37,6 @@ function showClipordToast(
   removeExistingToast()
   if (!accounts.length) return
 
-  // Use Shadow DOM to prevent host page CSS bleeding
   const host = document.createElement('div')
   host.id    = 'clipord-toast-host'
   Object.assign(host.style, {
@@ -118,7 +122,6 @@ function showClipordToast(
   const container = document.createElement('div')
   container.className = 'toast'
 
-  // Preview
   const previewEl = document.createElement('div')
   previewEl.className = 'preview'
   previewEl.textContent = '📋 ' + (preview || 'Save to Clipord?')
@@ -128,7 +131,6 @@ function showClipordToast(
   divider.className = 'divider'
   container.appendChild(divider)
 
-  // Account rows
   for (const acc of accounts) {
     const label = document.createElement('div')
     label.className = 'label'
@@ -160,7 +162,6 @@ function showClipordToast(
     row.appendChild(newSpaceBtn)
     container.appendChild(row)
 
-    // New space form
     const form    = document.createElement('div')
     form.className = 'space-form'
     form.id        = formId
@@ -189,7 +190,6 @@ function showClipordToast(
     container.appendChild(form)
   }
 
-  // Dismiss
   const dismissBtn = document.createElement('button')
   dismissBtn.className   = 'btn dismiss'
   dismissBtn.textContent = 'Dismiss'

@@ -20,7 +20,7 @@ export function InstallPrompt() {
     }
 
     // Check if prompt already captured before component mounted
-    import('../../src/main').then(({ getInstallPrompt }) => {
+    import('../../main').then(({ getInstallPrompt }) => {
       if (getInstallPrompt()) {
         hasPrompt.current = true
         setShow(true)
@@ -34,11 +34,11 @@ export function InstallPrompt() {
     }
     window.addEventListener('clipord:install-available', handler)
     return () => window.removeEventListener('clipord:install-available', handler)
-  }, [])
+  },[])
 
   const handleInstall = async () => {
     try {
-      const { getInstallPrompt, clearInstallPrompt } = await import('../../src/main')
+      const { getInstallPrompt, clearInstallPrompt } = await import('../../main')
       const prompt = getInstallPrompt()
       if (!prompt) return
       await prompt.prompt()

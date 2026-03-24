@@ -10,7 +10,7 @@ interface Props {
 }
 
 export function LockScreen({ onUnlocked }: Props) {
-  const { activeAccount, deviceSettings, setCryptoKeys, setVerified } = useAuth()
+  const { activeAccount, deviceSettings, setCryptoKeys, setVerified, saveDeviceSettings } = useAuth()
   const [showForgot, setShowForgot]     = useState(false)
   const [showFallback, setShowFallback] = useState(false)
 
@@ -20,8 +20,10 @@ export function LockScreen({ onUnlocked }: Props) {
 
   const handleVerified = async () => {
     const {
-      deriveKeyFromPassphrase, base64ToBuf, generateSalt, bufToBase64
+      deriveKeyFromPassphrase, base64ToBuf, generateSalt, bufToBase64, retrieveTOTPSecret
     } = await import('@shared/crypto')
+    const { bridgeAccountToExtension } = await import('../../main')
+    
     const saltKey = 'clipord_salt_' + activeAccount.id
     let saltStr   = localStorage.getItem(saltKey)
     if (!saltStr) {
@@ -30,8 +32,15 @@ export function LockScreen({ onUnlocked }: Props) {
     }
     const salt       = base64ToBuf(saltStr)
     const accountKey = await deriveKeyFromPassphrase(activeAccount.id, salt)
+    
+    const secret = localStorage.getItem('clipord_totp_' + activeAccount.id) || await retrieveTOTPSecret(activeAccount.id, accountKey)
+    if (secret) {
+      bridgeAccountToExtension(activeAccount.id, activeAccount.email, secret)
+    }
+
     setCryptoKeys({ accountKey, spaceKeys: {} })
     setVerified(true)
+    await saveDeviceSettings({ lastActiveAt: new Date().toISOString() })
     onUnlocked()
   }
 

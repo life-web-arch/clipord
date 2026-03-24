@@ -10,11 +10,15 @@ if (!supabaseUrl || !supabaseKey) {
   throw new Error('Missing Supabase env vars: VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY')
 }
 
+// Safely provide localStorage, preventing crashes in Extension background workers
+const storageAdapter = typeof window !== 'undefined' ? window.localStorage : undefined
+
 export const supabase = createClient(supabaseUrl, supabaseKey, {
   auth: {
     persistSession:     true,
     autoRefreshToken:   true,
     detectSessionInUrl: true,
+    storage:            storageAdapter,
   },
   realtime: {
     params: { eventsPerSecond: 10 },
@@ -96,8 +100,6 @@ export function subscribeToClips(
     ? 'clips:space:' + spaceId
     : 'clips:personal:' + accountId
 
-  // IMPORTANT: Supabase Realtime only supports ONE filter per subscription.
-  // For personal clips we filter by account_id only, then filter space_id in JS.
   const filter = spaceId
     ? 'space_id=eq.' + spaceId
     : 'account_id=eq.' + accountId
@@ -109,7 +111,6 @@ export function subscribeToClips(
       { event: 'INSERT', schema: 'public', table: 'clips', filter },
       (payload) => {
         const row = payload.new as Record<string, unknown>
-        // Client-side filter for personal clips (space_id must be null)
         if (!spaceId && row['space_id'] !== null) return
         onInsert(row)
       }
@@ -207,10 +208,6 @@ export async function createSpaceInSupabase(
   return { spaceId: memberErr ? null : spaceId, error: memberErr?.message ?? null }
 }
 
-/**
- * Fetch all spaces for a user AND decrypt their space keys.
- * Returns Space objects with decrypted spaceKeys ready to use.
- */
 export async function getSpacesWithKeys(
   userId: string,
   accountKey: CryptoKey
@@ -221,7 +218,7 @@ export async function getSpacesWithKeys(
     .eq('account_id', userId)
 
   if (mErr || !memberships || memberships.length === 0) {
-    return { spaces: [], spaceKeys: {} }
+    return { spaces:[], spaceKeys: {} }
   }
 
   const spaceIds = (memberships as SpaceMemberRow[]).map((m) => m.space_id)
@@ -233,7 +230,7 @@ export async function getSpacesWithKeys(
 
   if (sErr || !spacesData) return { spaces: [], spaceKeys: {} }
 
-  const spaces: Space[] = []
+  const spaces: Space[] =[]
   const spaceKeys: Record<string, CryptoKey> = {}
 
   for (const row of spacesData as SpaceRow[]) {
@@ -249,7 +246,6 @@ export async function getSpacesWithKeys(
           accountKey
         )
       } catch {
-        // Space key not yet distributed (pending approval) — skip
         continue
       }
     } else {

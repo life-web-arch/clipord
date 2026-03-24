@@ -1,9 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
-import { useAuthExtended } from '../../context/AuthContext'
+import { useAuth } from '../../context/AuthContext'
 import { useBiometric } from '../../hooks/useBiometric'
 import { signOut } from '@shared/supabase'
-import { getDeviceId } from '@shared/platform'
-import { upsertDeviceSettings } from '@shared/db'
 import type { VerificationMethod } from '@shared/types'
 import { Spinner } from '../ui/Spinner'
 
@@ -19,23 +17,22 @@ export function SettingsPage({ onClose }: Props) {
     lockApp,
     removeAccount,
     saveDeviceSettings,
-  } = useAuthExtended()
+  } = useAuth()
 
   const { isAvailable: isBiometricAvailable, register: registerBiometric } = useBiometric()
 
   const [biometricSupported, setBiometricSupported] = useState(false)
   const [saving, setSaving]   = useState(false)
   const [message, setMessage] = useState<{ text: string; ok: boolean } | null>(null)
-  const [confirmSignOut, setConfirmSignOut] = useState(false)
+  const[confirmSignOut, setConfirmSignOut] = useState(false)
 
-  // Local copies of settings so UI updates instantly
   const [verificationEnabled, setVerificationEnabled] = useState(
     deviceSettings?.verificationEnabled ?? true
   )
   const [verificationMethod, setVerificationMethod] = useState<VerificationMethod>(
     deviceSettings?.verificationMethod ?? 'totp'
   )
-  const [cacheWipeDays, setCacheWipeDays] = useState<number | null>(
+  const[cacheWipeDays, setCacheWipeDays] = useState<number | null>(
     deviceSettings?.cacheWipeAfterDays ?? null
   )
 
@@ -49,12 +46,12 @@ export function SettingsPage({ onClose }: Props) {
 
   useEffect(() => {
     isBiometricAvailable().then(setBiometricSupported)
-  }, [isBiometricAvailable])
+  },[isBiometricAvailable])
 
   const flash = useCallback((text: string, ok = true) => {
     setMessage({ text, ok })
     setTimeout(() => setMessage(null), 3000)
-  }, [])
+  },[])
 
   const handleSave = async () => {
     if (!activeAccount) return
@@ -94,7 +91,6 @@ export function SettingsPage({ onClose }: Props) {
 
   return (
     <div className="fixed inset-0 bg-dark-0 z-50 flex flex-col safe-top safe-bottom overflow-y-auto">
-      {/* Header */}
       <div className="sticky top-0 bg-dark-0/90 backdrop-blur-md border-b border-dark-200 px-4 py-3 flex items-center gap-3">
         <button
           onClick={onClose}
@@ -124,8 +120,6 @@ export function SettingsPage({ onClose }: Props) {
       )}
 
       <div className="flex-1 px-4 py-4 space-y-6 max-w-lg mx-auto w-full">
-
-        {/* Account info */}
         <section className="card">
           <p className="text-white/40 text-xs uppercase tracking-wider mb-3">Account</p>
           <div className="flex items-center gap-3">
@@ -141,11 +135,8 @@ export function SettingsPage({ onClose }: Props) {
           </div>
         </section>
 
-        {/* Security */}
         <section className="card space-y-4">
           <p className="text-white/40 text-xs uppercase tracking-wider">Security</p>
-
-          {/* Verification toggle */}
           <div className="flex items-center justify-between">
             <div>
               <p className="text-white text-sm font-medium">Require verification</p>
@@ -167,7 +158,6 @@ export function SettingsPage({ onClose }: Props) {
 
           {verificationEnabled && (
             <>
-              {/* Verification method */}
               <div>
                 <p className="text-white text-sm font-medium mb-2">Verification method</p>
                 <div className="space-y-2">
@@ -199,8 +189,6 @@ export function SettingsPage({ onClose }: Props) {
                   ))}
                 </div>
               </div>
-
-              {/* Register biometric */}
               {biometricSupported && (verificationMethod === 'biometric' || verificationMethod === 'both') && (
                 <button
                   onClick={handleEnableBiometric}
@@ -214,7 +202,6 @@ export function SettingsPage({ onClose }: Props) {
           )}
         </section>
 
-        {/* Cache / privacy */}
         <section className="card space-y-4">
           <p className="text-white/40 text-xs uppercase tracking-wider">Privacy</p>
           <div>
@@ -241,7 +228,6 @@ export function SettingsPage({ onClose }: Props) {
           </div>
         </section>
 
-        {/* Danger zone */}
         <section className="card border-red-500/20 space-y-3">
           <p className="text-white/40 text-xs uppercase tracking-wider">Danger zone</p>
           <button

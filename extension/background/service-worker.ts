@@ -1,16 +1,14 @@
 import browser from 'webextension-polyfill'
-import { getExtAccounts, getExtDeviceId } from '../lib/authBridge'
+import { syncAccountToExtension, getExtAccounts, getExtDeviceId } from '../lib/authBridge'
 import { encryptText, decryptText } from '@shared/crypto'
 import { detectClipType, generatePreview } from '@shared/detector'
 import { addClipEncrypted } from '../lib/extensionCrypto'
 import type { StoredClip } from '../lib/extensionCrypto'
 
-// SAFE: getDeviceId via browser.storage, NOT localStorage
 async function getDeviceId(): Promise<string> {
   return getExtDeviceId()
 }
 
-// ---- Context menus — use removeAll to prevent duplicate ID crash ----
 browser.runtime.onInstalled.addListener(async () => {
   await browser.contextMenus.removeAll()
   browser.contextMenus.create({
@@ -26,7 +24,6 @@ browser.runtime.onInstalled.addListener(async () => {
   })
 })
 
-// Also remove/recreate on startup to handle SW restarts
 browser.runtime.onStartup?.addListener(async () => {
   await browser.contextMenus.removeAll()
   browser.contextMenus.create({
@@ -53,7 +50,6 @@ browser.contextMenus.onClicked.addListener(async (info) => {
     await saveClip(accounts[0].id, info.selectionText, null)
     await notify('📋 Clip saved to Personal')
   } else {
-    // Multiple accounts — show toast in active tab
     await showToastInActiveTab(info.selectionText, accounts)
   }
 })
@@ -66,6 +62,14 @@ browser.commands.onCommand.addListener(async (command) => {
 
 browser.runtime.onMessage.addListener(async (message: Record<string, unknown>) => {
   const type = message['type'] as string
+
+  if (type === 'SYNC_ACCOUNT') {
+    const payload = message['payload'] as Record<string, string>
+    if (payload && payload.accountId && payload.email && payload.totpSecret) {
+      await syncAccountToExtension(payload.accountId, payload.email, payload.totpSecret)
+    }
+    return true
+  }
 
   if (type === 'SAVE_CLIP') {
     await saveClip(
@@ -116,7 +120,6 @@ async function handleClipboardContent(content: string): Promise<void> {
   const accounts = await getExtAccounts()
   if (accounts.length === 0) return
 
-  // Deduplicate using encrypted last clipboard
   if (await isLastClipboard(content)) return
   await storeLastClipboard(content)
 
@@ -131,7 +134,6 @@ async function showToastInActiveTab(
   const tab  = tabs[0]
   if (!tab?.id) return
 
-  // Skip restricted URLs that don't allow content scripts
   const url = tab.url ?? ''
   if (
     url.startsWith('chrome://') ||
@@ -154,14 +156,12 @@ async function showToastInActiveTab(
   }
 }
 
-// ---- Encrypted last clipboard ----
-
 async function storeLastClipboard(content: string): Promise<void> {
   const accounts = await getExtAccounts()
   if (accounts.length === 0) return
   const accountId = accounts[0].id
   const deviceId  = await getExtDeviceId()
-  // Simple key derivation without localStorage
+  
   const enc = new TextEncoder()
   const raw = enc.encode(accountId + ':' + deviceId + ':last-cb')
   const km  = await crypto.subtle.importKey('raw', raw, 'PBKDF2', false, ['deriveKey'])
@@ -196,8 +196,7 @@ async function isLastClipboard(content: string): Promise<boolean> {
       { name: 'PBKDF2', salt, iterations: 10_000, hash: 'SHA-256' },
       km,
       { name: 'AES-GCM', length: 256 },
-      false,
-      ['encrypt', 'decrypt']
+      false,['encrypt', 'decrypt']
     )
     const decrypted = await decryptText(ciphertext, iv, key)
     return decrypted === content

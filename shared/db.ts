@@ -21,7 +21,6 @@ export class CliportDB extends Dexie {
   constructor() {
     super('clipord')
     this.version(1).stores({
-      // IMPORTANT: Use plain `id` not `++id` — we use string UUIDs, not auto-increment integers.
       clips:          'id, accountId, spaceId, type, pinned, createdAt, wipeAt, synced',
       spaces:         'id, creatorId, createdAt',
       spaceMembers:   '[spaceId+accountId], spaceId, accountId, role',
@@ -41,43 +40,57 @@ export async function getClipsForAccount(
   accountId: string,
   spaceId: string | null = null
 ): Promise<Clip[]> {
-  const all = await db.clips.where({ accountId }).toArray()
-  const filtered = all.filter((c) =>
-    spaceId === null ? c.spaceId === null : c.spaceId === spaceId
-  )
-  return filtered.sort((a, b) => {
-    // Pinned first, then newest first
-    if (a.pinned && !b.pinned) return -1
-    if (!a.pinned && b.pinned) return 1
-    return b.createdAt.localeCompare(a.createdAt)
-  })
+  try {
+    const all = await db.clips.where({ accountId }).toArray()
+    const filtered = all.filter((c) =>
+      spaceId === null ? c.spaceId === null : c.spaceId === spaceId
+    )
+    return filtered.sort((a, b) => {
+      if (a.pinned && !b.pinned) return -1
+      if (!a.pinned && b.pinned) return 1
+      return b.createdAt.localeCompare(a.createdAt)
+    })
+  } catch (error) {
+    console.error("DB: Failed to get clips", error)
+    return[]
+  }
 }
 
 export async function searchClips(
   accountId: string,
   query: string
 ): Promise<Clip[]> {
-  const all = await db.clips.where({ accountId }).toArray()
-  const q   = query.toLowerCase()
-  return all.filter(
-    (c) =>
-      c.preview.toLowerCase().includes(q) ||
-      c.tags.some((t) => t.toLowerCase().includes(q))
-  )
+  try {
+    const all = await db.clips.where({ accountId }).toArray()
+    const q   = query.toLowerCase()
+    return all.filter(
+      (c) =>
+        c.preview.toLowerCase().includes(q) ||
+        c.tags.some((t) => t.toLowerCase().includes(q))
+    )
+  } catch (error) {
+    console.error("DB: Search failed", error)
+    return[]
+  }
 }
 
 export async function upsertClip(clip: Clip): Promise<void> {
-  await db.clips.put(clip)
+  await db.clips.put(clip).catch(err => console.error("DB: Failed to upsert clip", err))
 }
 
 export async function deleteClip(id: string): Promise<void> {
-  await db.clips.delete(id)
+  await db.clips.delete(id).catch(err => console.error("DB: Failed to delete clip", err))
 }
 
 export async function getExpiredClips(): Promise<Clip[]> {
-  const now = new Date().toISOString()
-  const all = await db.clips.toArray()
-  return all.filter((c) => c.wipeAt && c.wipeAt <= now)
+  try {
+    const now = new Date().toISOString()
+    const all = await db.clips.toArray()
+    return all.filter((c) => c.wipeAt && c.wipeAt <= now)
+  } catch (error) {
+    console.error("DB: Failed to get expired clips", error)
+    return[]
+  }
 }
 
 // ---- Device settings ----
@@ -86,24 +99,29 @@ export async function getDeviceSettings(
   accountId: string,
   deviceId: string
 ): Promise<DeviceSettings | undefined> {
-  return db.deviceSettings.get([accountId, deviceId])
+  return db.deviceSettings.get([accountId, deviceId]).catch(() => undefined)
 }
 
 export async function upsertDeviceSettings(settings: DeviceSettings): Promise<void> {
-  await db.deviceSettings.put(settings)
+  await db.deviceSettings.put(settings).catch(err => console.error("DB: Failed to upsert settings", err))
 }
 
 // ---- Spaces ----
 
 export async function getSpacesForAccount(accountId: string): Promise<Space[]> {
-  const memberships = await db.spaceMembers.where({ accountId }).toArray()
-  const spaceIds    = memberships.map((m) => m.spaceId)
-  if (spaceIds.length === 0) return []
-  return db.spaces.where('id').anyOf(spaceIds).toArray()
+  try {
+    const memberships = await db.spaceMembers.where({ accountId }).toArray()
+    const spaceIds    = memberships.map((m) => m.spaceId)
+    if (spaceIds.length === 0) return[]
+    return db.spaces.where('id').anyOf(spaceIds).toArray()
+  } catch (error) {
+    console.error("DB: Failed to get spaces", error)
+    return[]
+  }
 }
 
 export async function upsertSpace(space: Space): Promise<void> {
-  await db.spaces.put(space)
+  await db.spaces.put(space).catch(err => console.error("DB: Failed to upsert space", err))
 }
 
 // ---- Sync queue ----
@@ -113,23 +131,29 @@ export async function addToSyncQueue(item: Omit<SyncQueueItem, 'id'>): Promise<v
 }
 
 export async function getPendingSyncItems(): Promise<SyncQueueItem[]> {
-  return db.syncQueue.orderBy('createdAt').toArray()
+  return db.syncQueue.orderBy('createdAt').toArray().catch(() =>[])
 }
 
 export async function removeSyncQueueItem(id: string): Promise<void> {
-  await db.syncQueue.delete(id)
+  await db.syncQueue.delete(id).catch(err => console.error("DB: Failed to remove sync queue item", err))
 }
 
 // ---- Cache wipe ----
 
 export async function wipeAccountCache(accountId: string): Promise<void> {
-  await db.clips.where({ accountId }).delete()
-  await db.pendingClips.where({ accountId }).delete()
-  await db.spaceMembers.where({ accountId }).delete()
-  await db.spaces.where({ creatorId: accountId }).delete()
+  try {
+    await db.transaction('rw', db.clips, db.pendingClips, db.spaceMembers, db.spaces, async () => {
+      await db.clips.where({ accountId }).delete()
+      await db.pendingClips.where({ accountId }).delete()
+      await db.spaceMembers.where({ accountId }).delete()
+      await db.spaces.where({ creatorId: accountId }).delete()
+    })
+  } catch (error) {
+    console.error("DB: Failed to wipe account cache", error)
+  }
 }
 
-// ---- Camel ↔ Snake helpers for Supabase Realtime payloads ----
+// ---- Camel ↔ Snake helpers ----
 
 export function snakeToCamelClip(row: Record<string, unknown>): Clip {
   return {

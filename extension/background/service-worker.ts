@@ -1,6 +1,8 @@
 import browser from 'webextension-polyfill'
 import { encryptText, decryptText, deriveExtensionStorageKey } from '@shared/crypto'
+import { detectClipType, generatePreview } from '@shared/detector'
 import { getDeviceId } from '@shared/platform'
+import type { ClipType } from '@shared/types'
 
 const APP_URL = 'https://clipord.app'
 
@@ -19,17 +21,17 @@ browser.contextMenus.onClicked.addListener(async (info) => {
   if (info.menuItemId === 'clipord-personal') {
     const accounts = await getStoredAccounts()
     if (accounts.length === 0) return
-    // If only one account, save directly
     if (accounts.length === 1) {
       await saveClipEncrypted(accounts[0].id, info.selectionText, null)
       await notify('Clip saved to Personal')
     } else {
-      // Show toast to pick account
       const tabs = await browser.tabs.query({ active: true, currentWindow: true })
       if (tabs[0]?.id) {
         browser.tabs.sendMessage(tabs[0].id, {
-          type: 'SHOW_TOAST', preview: truncate(info.selectionText, 50),
-          content: info.selectionText, accounts,
+          type:     'SHOW_TOAST',
+          preview:  truncate(info.selectionText, 50),
+          content:  info.selectionText,
+          accounts,
         })
       }
     }
@@ -62,7 +64,6 @@ browser.runtime.onMessage.addListener(async (message: Record<string, unknown>) =
     return getStoredAccounts()
   }
   if (message.type === 'CREATE_SPACE_AND_SAVE') {
-    // Notify app to create space — open app in new tab with intent
     browser.tabs.create({
       url: `${APP_URL}/?intent=create-space&name=${encodeURIComponent(message.spaceName as string)}`
     })
@@ -77,7 +78,6 @@ async function handleClipboardContent(content: string) {
   const accounts = await getStoredAccounts()
   if (accounts.length === 0) return
 
-  // Check against encrypted last clipboard
   const isDuplicate = await isLastClipboard(content)
   if (isDuplicate) return
   await storeLastClipboard(content)
@@ -93,6 +93,9 @@ async function handleClipboardContent(content: string) {
   })
 }
 
+// Save a clip using the unified encrypted-blob format from extensionCrypto.
+// Each account has a single encrypted JSON array stored under
+// `clipord_clips_<accountId>`.  We load, append, trim to 100, and re-save.
 async function saveClipEncrypted(
   accountId: string,
   content: string,
@@ -101,24 +104,43 @@ async function saveClipEncrypted(
   const key = await getAccountStorageKey(accountId)
   if (!key) return
 
-  const { ciphertext, iv } = await encryptText(content, key)
-  const clip = {
+  // Load existing clips (they are stored as an encrypted JSON blob)
+  const existing = await loadClipsRaw(accountId, key)
+
+  const clip: StoredClip = {
     id:        crypto.randomUUID(),
     accountId,
     spaceId,
-    ciphertext,
-    iv,
+    content,
+    type:      detectClipType(content),
+    preview:   generatePreview(content, 60),
     createdAt: new Date().toISOString(),
   }
 
-  const storeKey = `clipord_clips_${accountId}`
-  const existing = await browser.storage.local.get(storeKey)
-  const rawList  = (existing[storeKey] as EncryptedClipRecord[] | undefined) ?? []
-  rawList.push(clip)
+  const updated = [...existing, clip].slice(-100)
+  await saveClipsRaw(accountId, updated, key)
+}
 
-  // Keep last 100 clips max
-  const trimmed = rawList.slice(-100)
-  await browser.storage.local.set({ [storeKey]: trimmed })
+// ---- Encrypted storage helpers (unified format) ----
+
+async function loadClipsRaw(accountId: string, key: CryptoKey): Promise<StoredClip[]> {
+  const storeKey = `clipord_clips_${accountId}`
+  const result = await browser.storage.local.get(storeKey)
+  const raw = result[storeKey] as string | undefined
+  if (!raw) return []
+  try {
+    const { ciphertext, iv } = JSON.parse(raw) as { ciphertext: string; iv: string }
+    const plaintext = await decryptText(ciphertext, iv, key)
+    return JSON.parse(plaintext) as StoredClip[]
+  } catch {
+    return []
+  }
+}
+
+async function saveClipsRaw(accountId: string, clips: StoredClip[], key: CryptoKey): Promise<void> {
+  const { ciphertext, iv } = await encryptText(JSON.stringify(clips), key)
+  const storeKey = `clipord_clips_${accountId}`
+  await browser.storage.local.set({ [storeKey]: JSON.stringify({ ciphertext, iv }) })
 }
 
 // ---- Last clipboard — stored encrypted ----
@@ -127,12 +149,11 @@ async function storeLastClipboard(content: string): Promise<void> {
   const accounts = await getStoredAccounts()
   if (accounts.length === 0) return
   const key = await getAccountStorageKey(accounts[0].id)
-  if (!key) {
-    // If no key available, store nothing — don't store plaintext
-    return
-  }
+  if (!key) return
   const { ciphertext, iv } = await encryptText(content, key)
-  await browser.storage.local.set({ clipord_last_cb: { ciphertext, iv, accountId: accounts[0].id } })
+  await browser.storage.local.set({
+    clipord_last_cb: { ciphertext, iv, accountId: accounts[0].id }
+  })
 }
 
 async function isLastClipboard(content: string): Promise<boolean> {
@@ -179,7 +200,12 @@ function truncate(str: string, max: number): string {
 // ---- Types ----
 
 interface StoredAccount { id: string; email: string }
-interface EncryptedClipRecord {
-  id: string; accountId: string; spaceId: string | null
-  ciphertext: string; iv: string; createdAt: string
+interface StoredClip {
+  id:        string
+  accountId: string
+  spaceId:   string | null
+  content:   string
+  type:      ClipType
+  preview:   string
+  createdAt: string
 }

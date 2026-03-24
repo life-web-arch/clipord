@@ -24,32 +24,6 @@ export const supabase = createClient(supabaseUrl, supabaseKey, {
   },
 })
 
-// ---- Multi-Account Session Management ----
-
-export async function stashCurrentSession(accountId: string) {
-  if (typeof localStorage === 'undefined') return null
-  const { data } = await supabase.auth.getSession()
-  if (data.session) {
-    localStorage.setItem('clipord_sb_session_' + accountId, JSON.stringify(data.session))
-    return data.session
-  }
-  return null
-}
-
-export async function restoreSession(accountId: string) {
-  if (typeof localStorage === 'undefined') return null
-  const raw = localStorage.getItem('clipord_sb_session_' + accountId)
-  if (raw) {
-    const session = JSON.parse(raw)
-    await supabase.auth.setSession({ 
-      access_token: session.access_token, 
-      refresh_token: session.refresh_token 
-    })
-    return session
-  }
-  return null
-}
-
 // ---- Auth ----
 
 export async function sendEmailOTP(email: string): Promise<{ error: string | null }> {
@@ -97,7 +71,7 @@ export async function getSession() {
   return data.session
 }
 
-// ---- Salt & Settings sync (for true cross-device E2E) ----
+// ---- Salt sync ----
 
 export async function fetchSaltFromServer(): Promise<string | null> {
   const user = await getCurrentUser()
@@ -207,6 +181,9 @@ export async function createSpaceInSupabase(
   encryptedSpaceKey: string,
   iv: string
 ): Promise<{ spaceId: string | null; error: string | null }> {
+  // Ensure session is fresh before critical insert
+  await supabase.auth.getSession()
+
   const { data, error } = await supabase
     .from('spaces')
     .insert({ name, creator_id: creatorId, allow_member_invite: false })
@@ -250,7 +227,7 @@ export async function getSpacesWithKeys(
     .select('*')
     .in('id', spaceIds)
 
-  if (sErr || !spacesData) return { spaces: [], spaceKeys: {} }
+  if (sErr || !spacesData) return { spaces:[], spaceKeys: {} }
 
   const spaces: Space[] =[]
   const spaceKeys: Record<string, CryptoKey> = {}

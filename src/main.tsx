@@ -39,20 +39,10 @@ if ('serviceWorker' in navigator) {
 export function bridgeAccountToExtension(
   accountId: string,
   email: string,
-  totpSecret: string,
-  sbSession?: any
+  totpSecret: string
 ): void {
   window.dispatchEvent(new CustomEvent('clipord:sync-account', {
-    detail: { 
-      accountId, 
-      email, 
-      totpSecret, 
-      sbSession: {
-        session: sbSession,
-        supabaseUrl: import.meta.env.VITE_SUPABASE_URL,
-        anonKey: import.meta.env.VITE_SUPABASE_ANON_KEY
-      } 
-    }
+    detail: { accountId, email, totpSecret }
   }))
 }
 

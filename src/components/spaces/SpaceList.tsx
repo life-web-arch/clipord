@@ -10,17 +10,26 @@ interface Props {
 export function SpaceList({ spaces }: Props) {
   const { activeSpaceId, setActiveSpace, createSpace } = useClips()
   const { activeAccount }                              = useAuth()
-  const [creating, setCreating]                        = useState(false)
+  const[creating, setCreating]                        = useState(false)
   const [spaceName, setSpaceName]                      = useState('')
-  const [saving, setSaving]                            = useState(false)
+  const[saving, setSaving]                            = useState(false)
+  const [errorMsg, setErrorMsg]                        = useState<string | null>(null)
 
   const handleCreate = async () => {
     if (!spaceName.trim() || !activeAccount) return
     setSaving(true)
-    await createSpace(spaceName.trim())
-    setSpaceName('')
-    setCreating(false)
-    setSaving(false)
+    setErrorMsg(null)
+    
+    const { error } = await createSpace(spaceName.trim())
+    
+    if (error) {
+      setErrorMsg(error)
+      setSaving(false)
+    } else {
+      setSpaceName('')
+      setCreating(false)
+      setSaving(false)
+    }
   }
 
   return (
@@ -58,7 +67,7 @@ export function SpaceList({ spaces }: Props) {
             onChange={(e) => setSpaceName(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter') handleCreate()
-              if (e.key === 'Escape') setCreating(false)
+              if (e.key === 'Escape') { setCreating(false); setErrorMsg(null); }
             }}
             placeholder="Space name..."
             className="input-field text-sm py-2 mb-2"
@@ -66,6 +75,9 @@ export function SpaceList({ spaces }: Props) {
             maxLength={40}
             disabled={saving}
           />
+          {errorMsg && (
+            <p className="text-red-400 text-xs mb-2 leading-tight px-1">{errorMsg}</p>
+          )}
           <div className="flex gap-2">
             <button
               onClick={handleCreate}
@@ -80,7 +92,7 @@ export function SpaceList({ spaces }: Props) {
               ) : 'Create'}
             </button>
             <button
-              onClick={() => { setCreating(false); setSpaceName('') }}
+              onClick={() => { setCreating(false); setSpaceName(''); setErrorMsg(null); }}
               className="btn-ghost py-1.5 px-3 text-xs text-white/40"
             >
               Cancel

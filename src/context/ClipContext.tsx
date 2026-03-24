@@ -41,7 +41,7 @@ interface ClipContextValue {
   setWipeTimer:    (clipId: string, wipeAt: string | null) => Promise<void>
   decryptClip:     (clip: Clip) => Promise<string>
   refreshClips:    () => Promise<void>
-  createSpace:     (name: string) => Promise<void>
+  createSpace:     (name: string) => Promise<{ error: string | null }>
 }
 
 const ClipContext = createContext<ClipContextValue | null>(null)
@@ -80,7 +80,7 @@ export function ClipProvider({ children }: { children: React.ReactNode }) {
       accountKey: cryptoKeys.accountKey,
       spaceKeys:  { ...cryptoKeys.spaceKeys, ...spaceKeys },
     })
-  }, [activeAccount, cryptoKeys?.accountKey])
+  },[activeAccount, cryptoKeys?.accountKey])
 
   useEffect(() => { refreshClips() }, [refreshClips])
   useEffect(() => { loadSpaces() }, [loadSpaces])
@@ -204,7 +204,7 @@ export function ClipProvider({ children }: { children: React.ReactNode }) {
     }
 
     await upsertClip(clip)
-    setClips((prev) => [clip, ...prev])
+    setClips((prev) =>[clip, ...prev])
 
     await addToSyncQueue({
       operation: 'insert',
@@ -280,36 +280,46 @@ export function ClipProvider({ children }: { children: React.ReactNode }) {
     return decryptText(clip.encryptedContent, clip.iv, key)
   }, [cryptoKeys])
 
-  const createSpace = useCallback(async (name: string) => {
-    if (!activeAccount || !cryptoKeys) return
-    const spaceKey = await generateSpaceKey()
-    const { encryptedSpaceKey, iv } = await encryptSpaceKey(spaceKey, cryptoKeys.accountKey)
+  const createSpace = useCallback(async (name: string): Promise<{ error: string | null }> => {
+    if (!activeAccount || !cryptoKeys) return { error: 'Authentication missing' }
+    
+    try {
+      const spaceKey = await generateSpaceKey()
+      const { encryptedSpaceKey, iv } = await encryptSpaceKey(spaceKey, cryptoKeys.accountKey)
 
-    const { spaceId, error } = await createSpaceInSupabase(
-      name,
-      activeAccount.id,
-      encryptedSpaceKey,
-      iv
-    )
+      const { spaceId, error } = await createSpaceInSupabase(
+        name,
+        activeAccount.id,
+        encryptedSpaceKey,
+        iv
+      )
 
-    if (error || !spaceId) { console.error('Create space failed:', error); return }
+      if (error || !spaceId) { 
+        console.error('Create space failed:', error)
+        return { error: error || 'Failed to create space' }
+      }
 
-    const space: Space = {
-      id:                spaceId,
-      name,
-      creatorId:         activeAccount.id,
-      allowMemberInvite: false,
-      encryptedSpaceKey,
-      iv,
-      createdAt:         new Date().toISOString(),
+      const space: Space = {
+        id:                spaceId,
+        name,
+        creatorId:         activeAccount.id,
+        allowMemberInvite: false,
+        encryptedSpaceKey,
+        iv,
+        createdAt:         new Date().toISOString(),
+      }
+
+      await upsertSpace(space)
+      setSpaces((prev) => [...prev, space])
+      setCryptoKeys({
+        accountKey: cryptoKeys.accountKey,
+        spaceKeys:  { ...cryptoKeys.spaceKeys, [spaceId]: spaceKey },
+      })
+
+      return { error: null }
+    } catch (err: any) {
+      return { error: err.message || 'Unknown error occurred' }
     }
-
-    await upsertSpace(space)
-    setSpaces((prev) => [...prev, space])
-    setCryptoKeys({
-      accountKey: cryptoKeys.accountKey,
-      spaceKeys:  { ...cryptoKeys.spaceKeys, [spaceId]: spaceKey },
-    })
   },[activeAccount, cryptoKeys, setCryptoKeys])
 
   return (

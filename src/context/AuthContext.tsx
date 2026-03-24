@@ -4,8 +4,7 @@ import React, {
 } from 'react'
 import { getDeviceId } from '@shared/platform'
 import { db, getDeviceSettings, upsertDeviceSettings, wipeAccountCache } from '@shared/db'
-import { supabase } from '@shared/supabase'
-import type { Account, DeviceSettings, CryptoKeys, VerificationMethod } from '@shared/types'
+import type { Account, DeviceSettings, CryptoKeys } from '@shared/types'
 
 const INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000
 
@@ -104,7 +103,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setIsLocked(false)
       resetInactivity()
     }
-  }, [resetInactivity])
+  },[resetInactivity])
 
   const setActiveAccount = useCallback(async (account: Account) => {
     setActiveAccountState(account)
@@ -133,7 +132,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     localStorage.removeItem('clipord_salt_' + accountId)
     localStorage.removeItem('clipord_bf_' + accountId)
     localStorage.removeItem('clipord_webauthn_' + accountId)
-    localStorage.removeItem('clipord_sb_session_' + accountId)
     setAccounts((prev) => {
       const updated = prev.filter((a) => a.id !== accountId)
       localStorage.setItem('clipord_accounts', JSON.stringify(updated))
@@ -164,7 +162,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       accountId: targetId,
       deviceId,
       verificationEnabled: true,
-      verificationMethod: 'totp',
+      verificationMethod: 'totp', // Default fallback, but will be overwritten by `...current`
       cacheWipeAfterDays: null,
       lastActiveAt: new Date().toISOString(),
       ...current,
@@ -175,16 +173,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (targetId === activeAccountState?.id) {
       setDeviceSettings(next)
     }
-
-    // Sync security preferences to Supabase so it's consistent across devices
-    if (updates.verificationMethod || updates.cacheWipeAfterDays !== undefined) {
-      await supabase.auth.updateUser({
-        data: {
-          verificationMethod: next.verificationMethod,
-          cacheWipeAfterDays: next.cacheWipeAfterDays
-        }
-      })
-    }
+    // Note: Deliberately skipping syncing verificationMethod to Supabase user_metadata 
+    // to preserve device-specific hardware features (WebAuthn/Biometrics)
   },[activeAccountState])
 
   return (

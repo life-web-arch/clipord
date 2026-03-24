@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
-import { Routes, Route, useNavigate } from 'react-router-dom'
+import { Routes, Route } from 'react-router-dom'
+import { BrowserRouter } from 'react-router-dom'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import { ClipProvider } from './context/ClipContext'
 import { AccountSwitcher } from './components/auth/AccountSwitcher'
@@ -8,8 +9,12 @@ import { TOTPSetup } from './components/auth/TOTPSetup'
 import { TOTPVerify } from './components/auth/TOTPVerify'
 import { BiometricVerify } from './components/auth/BiometricVerify'
 import { ForgotAccess } from './components/auth/ForgotAccess'
+import { LockScreen } from './components/auth/LockScreen'
 import { MainApp } from './pages/MainApp'
-import { deriveKeyFromPassphrase, generateSalt, bufToBase64, base64ToBuf } from '@shared/crypto'
+import {
+  deriveKeyFromPassphrase, generateSalt,
+  bufToBase64, base64ToBuf, storeTOTPSecret
+} from '@shared/crypto'
 import { upsertDeviceSettings } from '@shared/db'
 import { getDeviceId } from '@shared/platform'
 import type { Account, CryptoKeys } from '@shared/types'
@@ -21,52 +26,37 @@ type AuthStep =
   | 'totp-verify'
   | 'biometric-verify'
   | 'forgot'
+  | 'locked'
   | 'app'
 
 function AppInner() {
-  const { accounts, activeAccount, deviceSettings, isVerified,
-          setActiveAccount, setVerified, setCryptoKeys, addAccount } = useAuth()
-  const [step, setStep]             = useState<AuthStep>('switcher')
+  const {
+    accounts, activeAccount, deviceSettings,
+    isVerified, isLocked,
+    setActiveAccount, setVerified, setCryptoKeys, addAccount
+  } = useAuth()
+
+  const [step, setStep]                 = useState<AuthStep>('switcher')
   const [pendingEmail, setPendingEmail] = useState('')
   const [pendingUserId, setPendingUserId] = useState('')
-  const navigate = useNavigate()
+  const [pendingKey, setPendingKey]     = useState<CryptoKey | null>(null)
+
+  // React to lock state
+  useEffect(() => {
+    if (isLocked && step === 'app') setStep('locked')
+  }, [isLocked, step])
 
   useEffect(() => {
     if (accounts.length === 0) setStep('switcher')
   }, [accounts])
 
-  useEffect(() => {
-    if (isVerified) setStep('app')
-  }, [isVerified])
-
-  const handleSelectAccount = async (account: Account) => {
-    await setActiveAccount(account)
-    const hasTOTP = !!localStorage.getItem(`clipord_totp_${account.id}`)
-    if (!hasTOTP) {
-      setStep('add-account-email')
-      return
-    }
-    if (deviceSettings?.verificationEnabled === false) {
-      await unlockAccount(account)
-      return
-    }
-    const method = deviceSettings?.verificationMethod ?? 'totp'
-    if (method === 'biometric' || method === 'both') {
-      setStep('biometric-verify')
-    } else {
-      setStep('totp-verify')
-    }
-  }
-
-  const unlockAccount = async (account: Account) => {
-    const saltKey  = `clipord_salt_${account.id}`
-    let saltStr    = localStorage.getItem(saltKey)
+  const unlockAccount = async (account: Account): Promise<CryptoKey> => {
+    const saltKey = `clipord_salt_${account.id}`
+    let saltStr   = localStorage.getItem(saltKey)
     if (!saltStr) {
-      const { generateSalt, bufToBase64 } = await import('@shared/crypto')
       saltStr = bufToBase64(generateSalt())
       localStorage.setItem(saltKey, saltStr)
     }
-    const { base64ToBuf, deriveKeyFromPassphrase } = await import('@shared/crypto')
     const salt       = base64ToBuf(saltStr)
     const accountKey = await deriveKeyFromPassphrase(account.id, salt)
     const keys: CryptoKeys = { accountKey, spaceKeys: {} }
@@ -81,6 +71,26 @@ function AppInner() {
       cacheWipeAfterDays:  deviceSettings?.cacheWipeAfterDays  ?? null,
       lastActiveAt:        new Date().toISOString(),
     })
+    return accountKey
+  }
+
+  const handleSelectAccount = async (account: Account) => {
+    await setActiveAccount(account)
+    const hasTOTP = !!localStorage.getItem(`clipord_totp_enc_${account.id}`) ||
+                    !!localStorage.getItem(`clipord_totp_${account.id}`)
+    if (!hasTOTP) { setStep('add-account-email'); return }
+
+    if (deviceSettings?.verificationEnabled === false) {
+      await unlockAccount(account)
+      setStep('app')
+      return
+    }
+    const method = deviceSettings?.verificationMethod ?? 'totp'
+    if (method === 'biometric' || method === 'both') {
+      setStep('biometric-verify')
+    } else {
+      setStep('totp-verify')
+    }
   }
 
   const handleEmailVerified = (email: string, userId: string) => {
@@ -91,23 +101,34 @@ function AppInner() {
 
   const handleTOTPSetupComplete = async (secret: string) => {
     const account: Account = {
-      id:        pendingUserId,
-      email:     pendingEmail,
-      createdAt: new Date().toISOString(),
+      id: pendingUserId, email: pendingEmail, createdAt: new Date().toISOString(),
     }
     addAccount(account)
     await setActiveAccount(account)
-    await unlockAccount(account)
+    const accountKey = await unlockAccount(account)
+    // Store TOTP secret encrypted
+    await storeTOTPSecret(account.id, secret, accountKey)
+    setStep('app')
   }
 
   const handleTOTPVerified = async () => {
     if (!activeAccount) return
     await unlockAccount(activeAccount)
+    setStep('app')
   }
 
   const handleBiometricVerified = async () => {
     if (!activeAccount) return
     await unlockAccount(activeAccount)
+    setStep('app')
+  }
+
+  const handleLockScreenUnlocked = () => setStep('app')
+
+  // ---- Render ----
+
+  if (step === 'locked') {
+    return <LockScreen onUnlocked={handleLockScreenUnlocked} />
   }
 
   if (step === 'app' && isVerified) {
@@ -153,6 +174,7 @@ function AppInner() {
       <TOTPVerify
         accountId={activeAccount.id}
         email={activeAccount.email}
+        cryptoKey={pendingKey}
         onVerified={handleTOTPVerified}
         onForgot={() => setStep('forgot')}
       />
@@ -177,7 +199,9 @@ function AppInner() {
         accountId={activeAccount.id}
         email={activeAccount.email}
         onRecovered={handleTOTPVerified}
-        onBack={() => setStep(deviceSettings?.verificationMethod === 'biometric' ? 'biometric-verify' : 'totp-verify')}
+        onBack={() => setStep(
+          deviceSettings?.verificationMethod === 'biometric' ? 'biometric-verify' : 'totp-verify'
+        )}
       />
     )
   }
@@ -187,8 +211,10 @@ function AppInner() {
 
 export default function App() {
   return (
-    <AuthProvider>
-      <AppInner />
-    </AuthProvider>
+    <BrowserRouter>
+      <AuthProvider>
+        <AppInner />
+      </AuthProvider>
+    </BrowserRouter>
   )
 }

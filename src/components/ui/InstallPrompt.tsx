@@ -19,13 +19,13 @@ export function InstallPrompt() {
       return () => clearTimeout(t)
     }
 
-    // Check if prompt already captured before component mounted
-    import('../../main').then(({ getInstallPrompt }) => {
+    // Use the robust path alias '@/' to prevent build failures
+    import('@/main').then(({ getInstallPrompt }) => {
       if (getInstallPrompt()) {
         hasPrompt.current = true
         setShow(true)
       }
-    }).catch(() => {})
+    }).catch((e) => console.error("Failed to load install prompt handler", e))
 
     // Also listen for future fires
     const handler = () => {
@@ -38,7 +38,8 @@ export function InstallPrompt() {
 
   const handleInstall = async () => {
     try {
-      const { getInstallPrompt, clearInstallPrompt } = await import('../../main')
+      // Use the robust path alias '@/' here as well
+      const { getInstallPrompt, clearInstallPrompt } = await import('@/main')
       const prompt = getInstallPrompt()
       if (!prompt) return
       await prompt.prompt()

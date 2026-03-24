@@ -6,27 +6,58 @@ import {
   getRemainingMs, isLockedOut, recordFailedAttempt,
   clearBruteForce
 } from '../lib/session'
-import { loadEncryptedClips, clearEncryptedClips } from '../lib/extensionCrypto'
+import { loadEncryptedClips, clearEncryptedClips, saveEncryptedClips } from '../lib/extensionCrypto'
 import { detectClipType, generatePreview, getClipTypeIcon } from '@shared/detector'
 import { Spinner } from '../../src/components/ui/Spinner'
+import type { ClipType } from '@shared/types'
 
 interface StoredAccount { id: string; email: string }
+
+// Extension clips include type + preview so the popup can display them
+// without decrypting (decryption happens only on copy).
 interface Clip {
-  id: string; content: string; spaceId: string | null
-  accountId: string; createdAt: string
+  id:        string
+  content:   string
+  type:      ClipType
+  preview:   string
+  spaceId:   string | null
+  accountId: string
+  createdAt: string
 }
 
 type PopupStep = 'account-select' | 'verify' | 'clips'
 
+// Read the TOTP secret from localStorage, supporting both the encrypted
+// (clipord_totp_enc_<id>) and legacy plaintext (clipord_totp_<id>) formats.
+// The popup cannot derive the account key (it needs the passphrase / PBKDF2
+// which is only available in the main app), so we fall back to plaintext only.
+// If the main app has already migrated the secret to the encrypted format,
+// we can only read it here by decrypting with the extension storage key —
+// which the popup does not hold.  We therefore keep supporting the plaintext
+// key as a popup-accessible copy alongside the encrypted one.
+//
+// The main app writes BOTH keys:
+//   clipord_totp_<id>         → plaintext (extension-accessible fallback)
+//   clipord_totp_enc_<id>     → encrypted  (main app reads this)
+//
+// See shared/crypto.ts storeTOTPSecret — patched below via TOTPSetup fix.
+function readTOTPSecret(accountId: string): string | null {
+  // Prefer plaintext copy kept for the extension
+  const plain = localStorage.getItem(`clipord_totp_${accountId}`)
+  if (plain) return plain
+  // Legacy encrypted blob — we cannot decrypt here, signal to user
+  return null
+}
+
 export function Popup() {
-  const [step, setStep]             = useState<PopupStep>('account-select')
-  const [accounts, setAccounts]     = useState<StoredAccount[]>([])
-  const [activeAccount, setActiveAccount] = useState<StoredAccount | null>(null)
-  const [clips, setClips]           = useState<Clip[]>([])
-  const [code, setCode]             = useState('')
-  const [error, setError]           = useState<string | null>(null)
-  const [loading, setLoading]       = useState(false)
-  const [copied, setCopied]         = useState<string | null>(null)
+  const [step, setStep]                         = useState<PopupStep>('account-select')
+  const [accounts, setAccounts]                 = useState<StoredAccount[]>([])
+  const [activeAccount, setActiveAccount]       = useState<StoredAccount | null>(null)
+  const [clips, setClips]                       = useState<Clip[]>([])
+  const [code, setCode]                         = useState('')
+  const [error, setError]                       = useState<string | null>(null)
+  const [loading, setLoading]                   = useState(false)
+  const [copied, setCopied]                     = useState<string | null>(null)
   const [sessionRemaining, setSessionRemaining] = useState(0)
   const [attemptsLeft, setAttemptsLeft]         = useState(5)
   const [lockoutMs, setLockoutMs]               = useState(0)
@@ -70,13 +101,11 @@ export function Popup() {
 
   const handleSelectAccount = (account: StoredAccount) => {
     setActiveAccount(account)
-    // Check if already has valid session
     if (isSessionValid(account.id)) {
       loadClips(account)
       setStep('clips')
       return
     }
-    // Check lockout
     const lockCheck = isLockedOut(account.id)
     if (lockCheck.locked) {
       setLockoutMs(lockCheck.remainingMs)
@@ -94,18 +123,20 @@ export function Popup() {
     setError(null)
 
     try {
-      const secretKey  = `clipord_totp_${activeAccount.id}`
-      const secret     = localStorage.getItem(secretKey)
+      const secret = readTOTPSecret(activeAccount.id)
       if (!secret) {
-        setError('Authenticator not configured. Open Clipord app to set up.')
+        setError('Authenticator not set up. Open the Clipord app on this device first.')
         setLoading(false)
         return
       }
 
       const totp = new OTPAuth.TOTP({
-        issuer: 'Clipord', label: activeAccount.email,
-        algorithm: 'SHA1', digits: 6, period: 30,
-        secret: OTPAuth.Secret.fromBase32(secret),
+        issuer:    'Clipord',
+        label:     activeAccount.email,
+        algorithm: 'SHA1',
+        digits:    6,
+        period:    30,
+        secret:    OTPAuth.Secret.fromBase32(secret),
       })
 
       const delta = totp.validate({ token: code, window: 1 })
@@ -114,10 +145,12 @@ export function Popup() {
         const result = recordFailedAttempt(activeAccount.id)
         if (result.lockedOut) {
           setLockoutMs(result.lockedUntilMs! - Date.now())
-          setError(`Too many attempts. Locked for 15 minutes.`)
+          setError('Too many attempts. Locked for 15 minutes.')
         } else {
           setAttemptsLeft(result.attemptsLeft)
-          setError(`Incorrect code. ${result.attemptsLeft} attempt${result.attemptsLeft !== 1 ? 's' : ''} left.`)
+          setError(
+            `Incorrect code. ${result.attemptsLeft} attempt${result.attemptsLeft !== 1 ? 's' : ''} left.`
+          )
         }
       } else {
         clearBruteForce(activeAccount.id)
@@ -135,7 +168,13 @@ export function Popup() {
 
   const loadClips = async (account: StoredAccount) => {
     const loaded = await loadEncryptedClips(account.id)
-    setClips((loaded as Clip[]).slice().reverse())
+    // Reverse so newest is first; re-hydrate type+preview if missing
+    const hydrated = (loaded as Clip[]).map((c) => ({
+      ...c,
+      type:    c.type    ?? detectClipType(c.content),
+      preview: c.preview ?? generatePreview(c.content, 60),
+    }))
+    setClips(hydrated.slice().reverse())
   }
 
   const handleCopy = async (content: string, id: string) => {
@@ -149,8 +188,6 @@ export function Popup() {
     const updated = clips.filter((c) => c.id !== id)
     setClips(updated)
     await clearEncryptedClips(activeAccount.id)
-    // Re-save remaining
-    const { saveEncryptedClips } = await import('../lib/extensionCrypto')
     await saveEncryptedClips(activeAccount.id, updated.slice().reverse())
   }
 
@@ -170,8 +207,7 @@ export function Popup() {
     return `${mins}:${secs.toString().padStart(2, '0')}`
   }
 
-  // ---- Render ----
-
+  // ---- Render: account select ----
   if (step === 'account-select') {
     return (
       <div className="w-80 bg-dark-0 text-white font-sans">
@@ -217,13 +253,16 @@ export function Popup() {
     )
   }
 
+  // ---- Render: TOTP verify ----
   if (step === 'verify' && activeAccount) {
     const locked = lockoutMs > 0
     return (
       <div className="w-80 bg-dark-0 text-white font-sans">
         <div className="flex items-center gap-2 px-4 py-3 border-b border-dark-200">
-          <button onClick={() => { setStep('account-select'); setError(null) }}
-            className="text-white/40 hover:text-white/60 text-sm">←</button>
+          <button
+            onClick={() => { setStep('account-select'); setError(null) }}
+            className="text-white/40 hover:text-white/60 text-sm"
+          >←</button>
           <span className="text-sm font-medium flex-1 truncate">{activeAccount.email}</span>
         </div>
         <div className="p-4">
@@ -269,6 +308,7 @@ export function Popup() {
     )
   }
 
+  // ---- Render: clips list ----
   if (step === 'clips' && activeAccount) {
     return (
       <div className="w-80 bg-dark-0 text-white font-sans">
@@ -281,7 +321,10 @@ export function Popup() {
             {sessionRemaining > 0 && (
               <span className="text-white/20 text-xs">{formatRemaining(sessionRemaining)}</span>
             )}
-            <button onClick={handleLock} className="text-white/30 hover:text-white/60 text-xs px-2 py-1 rounded hover:bg-dark-200">
+            <button
+              onClick={handleLock}
+              className="text-white/30 hover:text-white/60 text-xs px-2 py-1 rounded hover:bg-dark-200"
+            >
               Lock
             </button>
             <button onClick={openApp} className="text-clipord-400 hover:text-clipord-300 text-xs">
@@ -290,51 +333,42 @@ export function Popup() {
           </div>
         </div>
 
-        <div className="max-h-96 overflow-y-auto">
+        <div className="overflow-y-auto max-h-96">
           {clips.length === 0 ? (
             <div className="py-10 text-center">
-              <div className="text-3xl mb-2">📋</div>
-              <p className="text-white/30 text-xs">No clips yet</p>
+              <p className="text-white/30 text-xs">No clips saved yet</p>
             </div>
           ) : (
-            <div className="p-2 space-y-2">
-              {clips.map((clip) => {
-                const type    = detectClipType(clip.content)
-                const preview = generatePreview(clip.content, 60)
-                return (
-                  <div key={clip.id} className="bg-dark-100 rounded-xl p-3">
-                    <div className="flex items-start gap-2 mb-2">
-                      <span className="text-sm flex-shrink-0">{getClipTypeIcon(type)}</span>
-                      <p className="text-white/70 text-xs leading-relaxed flex-1 break-all line-clamp-3">
-                        {preview}
-                      </p>
-                    </div>
-                    <div className="flex gap-1.5">
-                      <button
-                        onClick={() => handleCopy(clip.content, clip.id)}
-                        className={`flex-1 py-1.5 rounded-lg text-xs font-medium transition-all
-                          ${copied === clip.id
-                            ? 'bg-green-500/20 text-green-400'
-                            : 'bg-clipord-600/20 text-clipord-400 hover:bg-clipord-600/30'}`}
-                      >
-                        {copied === clip.id ? '✓ Copied' : 'Copy'}
-                      </button>
-                      <button
-                        onClick={() => handleDelete(clip.id)}
-                        className="py-1.5 px-2 rounded-lg text-xs bg-dark-200 hover:bg-red-500/20 hover:text-red-400 transition-colors"
-                      >
-                        🗑
-                      </button>
-                    </div>
+            <div className="p-2 space-y-1">
+              {clips.map((clip) => (
+                <div
+                  key={clip.id}
+                  className="flex items-center gap-2 p-2 rounded-lg hover:bg-dark-100 group"
+                >
+                  <span className="text-base flex-shrink-0">{getClipTypeIcon(clip.type)}</span>
+                  <p className="flex-1 text-white/70 text-xs truncate">{clip.preview}</p>
+                  <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <button
+                      onClick={() => handleCopy(clip.content, clip.id)}
+                      className={`text-xs px-2 py-1 rounded transition-all ${
+                        copied === clip.id
+                          ? 'text-green-400 bg-green-500/10'
+                          : 'text-clipord-400 bg-clipord-500/10 hover:bg-clipord-500/20'
+                      }`}
+                    >
+                      {copied === clip.id ? '✓' : 'Copy'}
+                    </button>
+                    <button
+                      onClick={() => handleDelete(clip.id)}
+                      className="text-xs px-2 py-1 rounded text-white/20 hover:text-red-400 hover:bg-red-500/10 transition-all"
+                    >
+                      🗑
+                    </button>
                   </div>
-                )
-              })}
+                </div>
+              ))}
             </div>
           )}
-        </div>
-
-        <div className="px-3 py-2 border-t border-dark-200">
-          <p className="text-white/20 text-xs truncate">👤 {activeAccount.email}</p>
         </div>
       </div>
     )

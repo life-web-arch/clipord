@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { Routes, Route, useNavigate, useLocation } from 'react-router-dom'
+import { Routes, Route, useNavigate, useLocation, useParams } from 'react-router-dom'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import { ClipProvider, useClipsSafe } from './context/ClipContext'
 import { AccountSwitcher } from './components/auth/AccountSwitcher'
@@ -56,7 +56,7 @@ function IntentHandler() {
         })
       }
     }
-  }, [location, navigate, clipCtx])
+  },[location, navigate, clipCtx])
 
   return null
 }
@@ -102,7 +102,7 @@ function InviteAccept() {
       navigate('/', { replace: true })
     }
     checkInvite()
-  }, [token, activeAccount, isVerified, clipCtx, navigate])
+  },[token, activeAccount, isVerified, clipCtx, navigate])
 
   return (
     <div className="min-h-screen bg-dark-0 flex items-center justify-center">
@@ -114,8 +114,6 @@ function InviteAccept() {
   )
 }
 
-import { useParams } from 'react-router-dom' // Ensure useParams is present
-
 function AppInner() {
   const {
     accounts, activeAccount, deviceSettings,
@@ -124,15 +122,15 @@ function AppInner() {
   } = useAuth()
 
   const [step, setStep]                   = useState<AuthStep>('switcher')
-  const [authError, setAuthError]         = useState<string | null>(null)
-  const [pendingEmail, setPendingEmail]   = useState('')
-  const [pendingUserId, setPendingUserId] = useState('')
-  const[cryptoKeyRef, setCryptoKeyRef]   = useState<CryptoKey | null>(null)
+  const[authError, setAuthError]         = useState<string | null>(null)
+  const[pendingEmail, setPendingEmail]   = useState('')
+  const[pendingUserId, setPendingUserId] = useState('')
+  const [cryptoKeyRef, setCryptoKeyRef]   = useState<CryptoKey | null>(null)
   const location                          = useLocation()
 
   useEffect(() => {
     if (isLocked && step === 'app') setStep('locked')
-  },[isLocked, step])
+  }, [isLocked, step])
 
   useEffect(() => {
     if (accounts.length === 0) setStep('switcher')
@@ -159,7 +157,7 @@ function AppInner() {
       
       await saveDeviceSettings({
         lastActiveAt: new Date().toISOString()
-      })
+      }, account.id)
       
       return accountKey
     } catch (error) {
@@ -176,7 +174,7 @@ function AppInner() {
       !!localStorage.getItem('clipord_totp_enc_' + account.id) ||
       !!localStorage.getItem('clipord_totp_' + account.id)
     if (!hasTOTP) {
-      setStep('add-account-email');
+      setStep('add-account-email')
       return
     }
 
@@ -209,7 +207,7 @@ function AppInner() {
         await setActiveAccount(account)
         const accountKey = await unlockAccount(account)
         
-        // Exclusively save via secure Encrypted Vault wrapper 
+        // Securely encrypt and store the newly created key right away
         await storeTOTPSecret(account.id, secret, accountKey)
         bridgeAccountToExtension(account.id, account.email, secret)
         

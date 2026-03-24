@@ -7,8 +7,6 @@ const PBKDF2_HASH       = 'SHA-256'
 const AES_ALGO          = 'AES-GCM'
 const AES_KEY_LENGTH    = 256
 const IV_LENGTH         = 12
-const HMAC_ALGO         = 'HMAC'
-const HMAC_HASH         = 'SHA-256'
 
 // ---------- Key derivation ----------
 
@@ -26,22 +24,6 @@ export async function deriveKeyFromPassphrase(
     { name: AES_ALGO, length: AES_KEY_LENGTH },
     false,
     ['encrypt', 'decrypt']
-  )
-}
-
-export async function deriveHMACKey(
-  passphrase: string,
-  salt: Uint8Array
-): Promise<CryptoKey> {
-  const enc = new TextEncoder()
-  const keyMaterial = await crypto.subtle.importKey(
-    'raw', enc.encode(passphrase), 'PBKDF2', false, ['deriveKey']
-  )
-  return crypto.subtle.deriveKey(
-    { name: 'PBKDF2', salt, iterations: PBKDF2_ITERATIONS, hash: PBKDF2_HASH },
-    keyMaterial,
-    { name: HMAC_ALGO, hash: HMAC_HASH },
-    false,['sign', 'verify']
   )
 }
 
@@ -83,6 +65,7 @@ export async function decryptText(
   key: CryptoKey
 ): Promise<string> {
   const dec = new TextDecoder()
+  // AES-GCM automatically throws an operation error if the data was tampered with
   const decrypted = await crypto.subtle.decrypt(
     { name: AES_ALGO, iv: base64ToBuf(iv) },
     key,
@@ -108,7 +91,7 @@ export async function exportKey(key: CryptoKey): Promise<ArrayBuffer> {
 export async function importKey(raw: ArrayBuffer): Promise<CryptoKey> {
   return crypto.subtle.importKey(
     'raw', raw, { name: AES_ALGO, length: AES_KEY_LENGTH },
-    false, ['encrypt', 'decrypt']
+    false,['encrypt', 'decrypt']
   )
 }
 
@@ -133,25 +116,6 @@ export async function decryptSpaceKey(
     base64ToBuf(encryptedSpaceKey)
   )
   return importKey(decrypted)
-}
-
-// ---------- HMAC integrity ----------
-
-export async function signData(data: string, key: CryptoKey): Promise<string> {
-  const enc = new TextEncoder()
-  const sig = await crypto.subtle.sign(HMAC_ALGO, key, enc.encode(data))
-  return bufToBase64(sig)
-}
-
-export async function verifyData(
-  data: string,
-  signature: string,
-  key: CryptoKey
-): Promise<boolean> {
-  const enc = new TextEncoder()
-  return crypto.subtle.verify(
-    HMAC_ALGO, key, base64ToBuf(signature), enc.encode(data)
-  )
 }
 
 // ---------- Constant-time comparison ----------
@@ -179,11 +143,10 @@ export async function storeTOTPSecret(
   accountKey: CryptoKey
 ): Promise<void> {
   const { ciphertext, iv } = await encryptText(secret, accountKey)
-  const integrity = await signData(ciphertext, accountKey)
   if (typeof localStorage !== 'undefined') {
     localStorage.setItem(
       'clipord_totp_enc_' + accountId,
-      JSON.stringify({ ciphertext, iv, integrity, v: 1 })
+      JSON.stringify({ ciphertext, iv, v: 2 })
     )
   }
 }
@@ -206,16 +169,10 @@ export async function retrieveTOTPSecret(
     return null
   }
   try {
-    const { ciphertext, iv, integrity } = JSON.parse(raw) as {
-      ciphertext: string; iv: string; integrity: string
-    }
-    const valid = await verifyData(ciphertext, integrity, accountKey)
-    if (!valid) {
-      console.error('TOTP integrity check failed — possible tampering')
-      return null
-    }
-    return decryptText(ciphertext, iv, accountKey)
-  } catch {
+    const parsed = JSON.parse(raw)
+    return await decryptText(parsed.ciphertext, parsed.iv, accountKey)
+  } catch (err) {
+    console.error("Failed to decrypt TOTP secret", err)
     return null
   }
 }

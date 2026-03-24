@@ -22,7 +22,7 @@ interface AuthContextValue {
   addAccount:       (account: Account) => void
   removeAccount:    (accountId: string) => Promise<void>
   refreshSettings:  () => Promise<void>
-  saveDeviceSettings: (settings: Partial<DeviceSettings>) => Promise<void>
+  saveDeviceSettings: (settings: Partial<DeviceSettings>, explicitAccountId?: string) => Promise<void>
   lockApp:          () => void
   resetInactivity:  () => void
 }
@@ -32,9 +32,9 @@ const AuthContext = createContext<AuthContextValue | null>(null)
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const[accounts, setAccounts]                = useState<Account[]>([])
   const [activeAccountState, setActiveAccountState] = useState<Account | null>(null)
-  const [deviceSettings, setDeviceSettings]    = useState<DeviceSettings | null>(null)
-  const [cryptoKeys, setCryptoKeysState]        = useState<CryptoKeys | null>(null)
-  const [isVerified, setIsVerified]            = useState(false)
+  const[deviceSettings, setDeviceSettings]    = useState<DeviceSettings | null>(null)
+  const[cryptoKeys, setCryptoKeysState]        = useState<CryptoKeys | null>(null)
+  const[isVerified, setIsVerified]            = useState(false)
   const[isLocked, setIsLocked]                = useState(false)
   const [isLoading, setIsLoading]              = useState(true)
   const inactivityTimer                         = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -82,7 +82,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (!isVerified) return
-    const events = ['mousedown', 'keydown', 'touchstart', 'scroll', 'click']
+    const events =['mousedown', 'keydown', 'touchstart', 'scroll', 'click']
     const handler = () => resetInactivity()
     events.forEach((e) => window.addEventListener(e, handler, { passive: true }))
     resetInactivity()
@@ -90,7 +90,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       events.forEach((e) => window.removeEventListener(e, handler))
       if (inactivityTimer.current) clearTimeout(inactivityTimer.current)
     }
-  }, [isVerified, resetInactivity])
+  },[isVerified, resetInactivity])
 
   const setCryptoKeys = useCallback((keys: CryptoKeys) => {
     cryptoKeysRef.current = keys
@@ -152,12 +152,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setDeviceSettings(settings ?? null)
   }, [activeAccountState])
 
-  const saveDeviceSettings = useCallback(async (updates: Partial<DeviceSettings>) => {
-    if (!activeAccountState) return
+  const saveDeviceSettings = useCallback(async (updates: Partial<DeviceSettings>, explicitAccountId?: string) => {
+    const targetId = explicitAccountId || activeAccountState?.id
+    if (!targetId) return
     const deviceId = getDeviceId()
-    const current = await getDeviceSettings(activeAccountState.id, deviceId)
+    const current = await getDeviceSettings(targetId, deviceId)
     const next: DeviceSettings = {
-      accountId: activeAccountState.id,
+      accountId: targetId,
       deviceId,
       verificationEnabled: true,
       verificationMethod: 'totp',
@@ -167,7 +168,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       ...updates,
     }
     await upsertDeviceSettings(next)
-    setDeviceSettings(next)
+    if (targetId === activeAccountState?.id) {
+      setDeviceSettings(next)
+    }
   },[activeAccountState])
 
   return (

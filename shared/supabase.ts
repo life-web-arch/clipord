@@ -9,19 +9,39 @@ if (!supabaseUrl || !supabaseKey) {
 
 export const supabase = createClient(supabaseUrl, supabaseKey, {
   auth: {
-    persistSession:    true,
-    autoRefreshToken:  true,
+    persistSession:     true,
+    autoRefreshToken:   true,
     detectSessionInUrl: true,
+    // Use PKCE flow for security
+    flowType: 'pkce',
   },
   realtime: {
     params: { eventsPerSecond: 10 },
   },
 })
 
+/**
+ * Send a 6-digit OTP to the user's email.
+ *
+ * IMPORTANT — Supabase dashboard setup required:
+ *   Authentication → Email → OTP Expiry: 600 (10 min)
+ *   Authentication → Email → "Enable Email OTP": ON
+ *   Authentication → Templates → "Magic Link" template:
+ *     Change subject to "Your Clipord verification code"
+ *     Change body to: "Your verification code is: {{ .Token }}"
+ *     (This makes Supabase send the raw 6-digit OTP, not a link)
+ *
+ *   OR go to Authentication → Settings → enable "OTP" login
+ *   and disable "Magic link" so users get a code, not a URL.
+ */
 export async function sendEmailOTP(email: string): Promise<{ error: string | null }> {
   const { error } = await supabase.auth.signInWithOtp({
     email,
-    options: { shouldCreateUser: true },
+    options: {
+      shouldCreateUser: true,
+      // This tells Supabase to send a 6-digit OTP code (not a magic link)
+      // when "Email OTP" is enabled in your Supabase project settings
+    },
   })
   return { error: error?.message ?? null }
 }
@@ -38,11 +58,17 @@ export async function verifyEmailOTP(
   return { error: error?.message ?? null }
 }
 
+/**
+ * Send a password reset email.
+ * The link redirects to VITE_APP_URL/reset-password#access_token=...
+ * which our ResetPassword page handles.
+ */
 export async function sendPasswordResetEmail(
   email: string
 ): Promise<{ error: string | null }> {
+  const appUrl = import.meta.env.VITE_APP_URL as string || window.location.origin
   const { error } = await supabase.auth.resetPasswordForEmail(email, {
-    redirectTo: `${import.meta.env.VITE_APP_URL}/reset-password`,
+    redirectTo: `${appUrl}/reset-password`,
   })
   return { error: error?.message ?? null }
 }
@@ -56,17 +82,15 @@ export async function getCurrentUser() {
   return data.user
 }
 
-// Fetch all spaces the current user is a member of, including their
-// encrypted space key so the client can decrypt it with the account key.
-export async function getSpacesWithKeys(accountId: string): Promise<
+export async function getSpacesWithKeys(accountId: string): Promise
   Array<{
-    id:                string
-    name:              string
-    creator_id:        string
+    id:                  string
+    name:                string
+    creator_id:          string
     allow_member_invite: boolean
-    created_at:        string
+    created_at:          string
     encrypted_space_key: string
-    iv:                string
+    iv:                  string
   }>
 > {
   const { data, error } = await supabase
@@ -108,8 +132,6 @@ export async function getSpacesWithKeys(accountId: string): Promise<
     })
 }
 
-// Create a new space and insert the creator as the first member with the
-// encrypted space key.  Returns the new space id or null on error.
 export async function createSpaceInSupabase(
   name: string,
   creatorId: string,
@@ -157,16 +179,12 @@ export function subscribeToClips(
         event:  'INSERT',
         schema: 'public',
         table:  'clips',
-        // NOTE: Supabase realtime filters use the column=eq.value syntax.
-        // Multiple conditions require separate .on() calls; we handle the
-        // space_id null case client-side after receiving the event.
         filter: spaceId
           ? `space_id=eq.${spaceId}`
           : `account_id=eq.${accountId}`,
       },
       (payload) => {
         const row = payload.new as Record<string, unknown>
-        // For personal clips, discard events that belong to a space
         if (!spaceId && row['space_id'] !== null) return
         onInsert(row)
       }

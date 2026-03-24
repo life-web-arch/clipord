@@ -1,7 +1,7 @@
 -- Enable UUID extension
 create extension if not exists "uuid-ossp";
 
--- Spaces table (must be created before clips)
+-- Spaces table
 create table if not exists spaces (
   id                    uuid primary key default uuid_generate_v4(),
   name                  text not null,
@@ -31,9 +31,10 @@ create table if not exists space_members (
   space_id            uuid not null references spaces(id) on delete cascade,
   account_id          uuid not null references auth.users(id) on delete cascade,
   role                text not null check (role in ('creator','member')),
-  encrypted_space_key text not null,
-  iv                  text not null,
+  encrypted_space_key text not null default '',
+  iv                  text not null default '',
   joined_at           timestamptz not null default now(),
+  approved            boolean not null default false,
   primary key (space_id, account_id)
 );
 
@@ -56,41 +57,79 @@ alter table space_members enable row level security;
 alter table space_invites enable row level security;
 
 -- Clips: personal
+drop policy if exists "personal clips" on clips;
 create policy "personal clips" on clips
   for all using (
     account_id = auth.uid() and space_id is null
   );
 
 -- Clips: space clips
+drop policy if exists "space clips" on clips;
 create policy "space clips" on clips
   for all using (
     space_id in (
-      select space_id from space_members where account_id = auth.uid()
+      select space_id from space_members where account_id = auth.uid() and approved = true
     )
   );
 
 -- Spaces: members can see spaces they belong to
+drop policy if exists "space visibility" on spaces;
 create policy "space visibility" on spaces
   for select using (
     id in (select space_id from space_members where account_id = auth.uid())
   );
 
--- Space members: own memberships
+-- Spaces: creators can insert
+drop policy if exists "space insert" on spaces;
+create policy "space insert" on spaces
+  for insert with check (creator_id = auth.uid());
+
+-- Space members: own memberships select
+drop policy if exists "own memberships" on space_members;
 create policy "own memberships" on space_members
   for select using (account_id = auth.uid());
 
 -- Space members: co-member visibility
+drop policy if exists "co-member visibility" on space_members;
 create policy "co-member visibility" on space_members
   for select using (
     space_id in (select space_id from space_members where account_id = auth.uid())
   );
 
+-- Space members: users can insert themselves (pending invite accept)
+drop policy if exists "member self insert" on space_members;
+create policy "member self insert" on space_members
+  for insert with check (account_id = auth.uid());
+
+-- Space members: creators can update (approve members, set encrypted_space_key)
+drop policy if exists "creator update members" on space_members;
+create policy "creator update members" on space_members
+  for update using (
+    space_id in (
+      select space_id from space_members
+      where account_id = auth.uid() and role = 'creator'
+    )
+  );
+
 -- Space invites: visibility
+drop policy if exists "invite visibility" on space_invites;
 create policy "invite visibility" on space_invites
   for select using (
     space_id in (select space_id from space_members where account_id = auth.uid())
+    or token is not null  -- anyone with the token can read (needed for accept flow)
   );
+
+-- Space invites: members with allow_member_invite can insert
+drop policy if exists "invite insert" on space_invites;
+create policy "invite insert" on space_invites
+  for insert with check (created_by = auth.uid());
+
+-- Space invites: update (mark used)
+drop policy if exists "invite update" on space_invites;
+create policy "invite update" on space_invites
+  for update using (auth.uid() is not null);
 
 -- Realtime
 alter publication supabase_realtime add table clips;
 alter publication supabase_realtime add table space_invites;
+alter publication supabase_realtime add table space_members;

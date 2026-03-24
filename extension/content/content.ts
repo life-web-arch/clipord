@@ -3,10 +3,17 @@ import browser from 'webextension-polyfill'
 let toastEl: HTMLElement | null = null
 let dismissTimer: ReturnType<typeof setTimeout> | null = null
 
+// Deduplication: track last sent content to avoid flooding
+let lastSentContent = ''
+let lastSentTime    = 0
+const DEBOUNCE_MS   = 500 // ignore duplicate sends within 500ms
+
 browser.runtime.onMessage.addListener((message: Record<string, unknown>) => {
   if (message.type === 'GET_CLIPBOARD') {
     navigator.clipboard.readText().then((text) => {
-      browser.runtime.sendMessage({ type: 'CLIPBOARD_CONTENT', content: text })
+      if (text?.trim()) {
+        browser.runtime.sendMessage({ type: 'CLIPBOARD_CONTENT', content: text })
+      }
     }).catch(() => {})
   }
   if (message.type === 'SHOW_TOAST') {
@@ -18,12 +25,19 @@ browser.runtime.onMessage.addListener((message: Record<string, unknown>) => {
   }
 })
 
+// Deduplicated copy event listener
 document.addEventListener('copy', () => {
   setTimeout(() => {
     navigator.clipboard.readText().then((text) => {
-      if (text?.trim()) {
-        browser.runtime.sendMessage({ type: 'CLIPBOARD_CONTENT', content: text })
-      }
+      if (!text?.trim()) return
+
+      const now = Date.now()
+      // Skip if same content was sent very recently
+      if (text === lastSentContent && now - lastSentTime < DEBOUNCE_MS) return
+
+      lastSentContent = text
+      lastSentTime    = now
+      browser.runtime.sendMessage({ type: 'CLIPBOARD_CONTENT', content: text })
     }).catch(() => {})
   }, 100)
 })
@@ -54,10 +68,8 @@ function showClipordToast(preview: string, content: string, accounts: StoredAcco
     btn.addEventListener('click', (e) => {
       e.stopPropagation()
       const accountId  = (e.currentTarget as HTMLElement).getAttribute('data-account-id') ?? ''
-      const nameInput  = toastEl?.querySelector<HTMLInputElement>(`[data-space-name="${accountId}"]`)
       const container  = toastEl?.querySelector(`[data-new-space-form="${accountId}"]`) as HTMLElement | null
       if (container) container.style.display = container.style.display === 'none' ? 'block' : 'none'
-      nameInput?.focus()
     })
   })
 
@@ -80,7 +92,7 @@ function buildToastHTML(preview: string, accounts: StoredAccount[]): string {
   const accountsHTML = accounts.map((acc) => `
     <div style="margin-bottom:8px;">
       <div style="font-size:10px;color:rgba(255,255,255,0.4);margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
-        👤 ${acc.email}
+        👤 ${escapeHTML(acc.email)}
       </div>
       <div style="display:flex;gap:4px;flex-wrap:wrap;">
         <button data-save data-account-id="${acc.id}" data-space-id="" style="${btnStyle('#4f52e5')}">Personal</button>
@@ -141,7 +153,12 @@ function removeExistingToast() {
 }
 
 function escapeHTML(str: string): string {
-  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;')
 }
 
 interface StoredAccount {

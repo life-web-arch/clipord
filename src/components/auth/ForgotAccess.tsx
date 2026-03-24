@@ -4,33 +4,49 @@ import { sendPasswordResetEmail } from '@shared/supabase'
 import { Spinner } from '../ui/Spinner'
 
 interface Props {
-  accountId:  string
-  email:      string
+  accountId:   string
+  email:       string
   onRecovered: () => void
   onBack:      () => void
 }
 
 export function ForgotAccess({ accountId, email, onRecovered, onBack }: Props) {
-  const [mode, setMode]         = useState<'choose' | 'totp' | 'email'>('choose')
-  const [code, setCode]         = useState('')
-  const [loading, setLoading]   = useState(false)
-  const [error, setError]       = useState<string | null>(null)
-  const [emailSent, setEmailSent] = useState(false)
+  const [mode, setMode]             = useState<'choose' | 'totp' | 'email'>('choose')
+  const [code, setCode]             = useState('')
+  const [loading, setLoading]       = useState(false)
+  const [error, setError]           = useState<string | null>(null)
+  const [emailSent, setEmailSent]   = useState(false)
 
   const handleTOTP = async () => {
     setLoading(true)
     setError(null)
+
+    // Try plaintext copy first (written by TOTPSetup for extension compatibility)
+    // Fall back to nothing — we can't decrypt without the accountKey here
     const secret = localStorage.getItem(`clipord_totp_${accountId}`)
-    if (!secret) { setError('No TOTP configured'); setLoading(false); return }
-    const totp = new OTPAuth.TOTP({
-      issuer: 'Clipord', label: email, algorithm: 'SHA1',
-      digits: 6, period: 30, secret: OTPAuth.Secret.fromBase32(secret),
-    })
-    const delta = totp.validate({ token: code, window: 1 })
-    if (delta === null) {
-      setError('Invalid code')
-    } else {
-      onRecovered()
+
+    if (!secret) {
+      setError(
+        'TOTP secret not accessible. If you previously reset your device, ' +
+        'please use the email reset option instead.'
+      )
+      setLoading(false)
+      return
+    }
+
+    try {
+      const totp = new OTPAuth.TOTP({
+        issuer: 'Clipord', label: email, algorithm: 'SHA1',
+        digits: 6, period: 30, secret: OTPAuth.Secret.fromBase32(secret),
+      })
+      const delta = totp.validate({ token: code, window: 1 })
+      if (delta === null) {
+        setError('Invalid code. Please check your authenticator app.')
+      } else {
+        onRecovered()
+      }
+    } catch {
+      setError('Verification failed. Please try again.')
     }
     setLoading(false)
   }
@@ -39,7 +55,11 @@ export function ForgotAccess({ accountId, email, onRecovered, onBack }: Props) {
     setLoading(true)
     setError(null)
     const { error: err } = await sendPasswordResetEmail(email)
-    if (err) { setError(err) } else { setEmailSent(true) }
+    if (err) {
+      setError(err)
+    } else {
+      setEmailSent(true)
+    }
     setLoading(false)
   }
 
@@ -90,6 +110,7 @@ export function ForgotAccess({ accountId, email, onRecovered, onBack }: Props) {
               inputMode="numeric"
               maxLength={6}
               autoFocus
+              autoComplete="one-time-code"
             />
             <button
               onClick={handleTOTP}
@@ -107,8 +128,13 @@ export function ForgotAccess({ accountId, email, onRecovered, onBack }: Props) {
             {!emailSent ? (
               <>
                 <p className="text-white/40 text-sm mb-8">
-                  A reset link will be sent to <span className="text-white/60">{email}</span>.
-                  It expires in 1 hour.
+                  A password reset link will be sent to{' '}
+                  <span className="text-white/60">{email}</span>. It expires in 1 hour.
+                  <br /><br />
+                  <span className="text-yellow-400/70 text-xs">
+                    ⚠️ Note: resetting via email will require you to set up your
+                    authenticator app again on next login.
+                  </span>
                 </p>
                 {error && (
                   <div className="bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3 mb-4">
@@ -127,8 +153,13 @@ export function ForgotAccess({ accountId, email, onRecovered, onBack }: Props) {
               <div className="text-center">
                 <div className="text-5xl mb-4">📬</div>
                 <p className="text-white/70 text-sm">
-                  Reset link sent to <span className="text-white font-medium">{email}</span>.
+                  Reset link sent to{' '}
+                  <span className="text-white font-medium">{email}</span>.
                   Check your inbox and spam folder.
+                </p>
+                <p className="text-white/30 text-xs mt-4">
+                  Click the link in the email to reset your account,
+                  then sign in again with a new authenticator setup.
                 </p>
               </div>
             )}

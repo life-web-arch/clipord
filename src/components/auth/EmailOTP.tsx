@@ -8,11 +8,12 @@ interface Props {
 }
 
 export function EmailOTP({ onVerified, onBack }: Props) {
-  const [email, setEmail]       = useState('')
-  const [otp, setOtp]           = useState('')
-  const [step, setStep]         = useState<'email' | 'otp'>('email')
-  const [loading, setLoading]   = useState(false)
-  const [error, setError]       = useState<string | null>(null)
+  const [email, setEmail]     = useState('')
+  const [otp, setOtp]         = useState('')
+  const [step, setStep]       = useState<'email' | 'otp'>('email')
+  const [loading, setLoading] = useState(false)
+  const [error, setError]     = useState<string | null>(null)
+  const [resending, setResending] = useState(false)
 
   const handleSendOTP = async () => {
     if (!email.trim()) return
@@ -27,17 +28,31 @@ export function EmailOTP({ onVerified, onBack }: Props) {
     setLoading(false)
   }
 
+  const handleResend = async () => {
+    setResending(true)
+    setError(null)
+    setOtp('')
+    const { error: err } = await sendEmailOTP(email.trim().toLowerCase())
+    if (err) setError(err)
+    setResending(false)
+  }
+
   const handleVerifyOTP = async () => {
-    if (!otp.trim()) return
+    if (!otp.trim() || otp.length < 6) return
     setLoading(true)
     setError(null)
     const { error: err } = await verifyEmailOTP(email.trim().toLowerCase(), otp.trim())
     if (err) {
       setError(err)
+      setLoading(false)
+      return
+    }
+    const { getCurrentUser } = await import('@shared/supabase')
+    const user = await getCurrentUser()
+    if (user) {
+      onVerified(email.trim().toLowerCase(), user.id)
     } else {
-      const { getCurrentUser } = await import('@shared/supabase')
-      const user = await getCurrentUser()
-      if (user) onVerified(email.trim().toLowerCase(), user.id)
+      setError('Could not retrieve user. Please try again.')
     }
     setLoading(false)
   }
@@ -55,10 +70,19 @@ export function EmailOTP({ onVerified, onBack }: Props) {
           </h2>
           <p className="text-white/40 text-sm mt-2">
             {step === 'email'
-              ? 'We\'ll send a one-time code to verify it\'s you'
-              : `We sent a code to ${email}`}
+              ? "We'll send a 6-digit verification code"
+              : `Enter the 6-digit code sent to ${email}`}
           </p>
         </div>
+
+        {step === 'otp' && (
+          <div className="bg-clipord-950/50 border border-clipord-500/20 rounded-xl px-4 py-3 mb-4">
+            <p className="text-clipord-300 text-xs">
+              📬 <strong>Look for an email from Supabase</strong> with subject "Your verification code"
+              or "Confirm your email". The email contains a 6-digit number — enter it below.
+            </p>
+          </div>
+        )}
 
         {error && (
           <div className="bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3 mb-4">
@@ -93,16 +117,31 @@ export function EmailOTP({ onVerified, onBack }: Props) {
               value={otp}
               onChange={(e) => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
               onKeyDown={(e) => e.key === 'Enter' && handleVerifyOTP()}
-              placeholder="6-digit code"
+              placeholder="000000"
               className="input-field mb-2 text-center text-xl tracking-widest font-mono"
               autoFocus
               inputMode="numeric"
               maxLength={6}
+              autoComplete="one-time-code"
             />
             <p className="text-white/30 text-xs text-center mb-4">
               Didn't receive it?{' '}
-              <button onClick={() => { setStep('email'); setOtp('') }} className="text-clipord-400 hover:underline">
-                Resend
+              {resending ? (
+                <span className="text-clipord-400">Sending…</span>
+              ) : (
+                <button
+                  onClick={handleResend}
+                  className="text-clipord-400 hover:underline"
+                >
+                  Resend code
+                </button>
+              )}
+              {' '}or{' '}
+              <button
+                onClick={() => { setStep('email'); setOtp('') }}
+                className="text-clipord-400 hover:underline"
+              >
+                change email
               </button>
             </p>
             <button

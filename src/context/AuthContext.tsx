@@ -38,6 +38,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isLoading, setIsLoading]             = useState(true)
   const inactivityTimer                        = useRef<ReturnType<typeof setTimeout> | null>(null)
   const cryptoKeysRef                          = useRef<CryptoKeys | null>(null)
+  // Use a ref for lockApp so resetInactivity can reference it without stale closure
+  const lockAppRef = useRef<() => void>(() => {/* noop until mounted */})
 
   // Load accounts from localStorage on mount
   useEffect(() => {
@@ -53,28 +55,43 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (!isVerified) return
     const handleVisibility = () => {
       if (document.hidden) {
-        // Blur content immediately so app switcher can't capture it
-        document.body.style.filter = 'blur(20px)'
+        document.body.style.filter        = 'blur(20px)'
         document.body.style.pointerEvents = 'none'
       } else {
-        document.body.style.filter = ''
+        document.body.style.filter        = ''
         document.body.style.pointerEvents = ''
-        // If was hidden for too long, lock
-        // (handled by inactivity timer below)
       }
     }
     document.addEventListener('visibilitychange', handleVisibility)
     return () => document.removeEventListener('visibilitychange', handleVisibility)
   }, [isVerified])
 
-  // Inactivity timer
+  // lockApp — defined before resetInactivity so the ref is always up to date
+  const lockApp = useCallback(() => {
+    setIsVerified(false)
+    setIsLocked(true)
+    cryptoKeysRef.current = null
+    setCryptoKeysState(null)
+    document.body.style.filter        = ''
+    document.body.style.pointerEvents = ''
+    if (inactivityTimer.current) {
+      clearTimeout(inactivityTimer.current)
+      inactivityTimer.current = null
+    }
+  }, [])
+
+  // Keep the ref in sync so resetInactivity's closure always calls the latest lockApp
+  useEffect(() => {
+    lockAppRef.current = lockApp
+  }, [lockApp])
+
+  // Inactivity timer — uses ref to avoid stale lockApp closure
   const resetInactivity = useCallback(() => {
-    if (!isVerified) return
     if (inactivityTimer.current) clearTimeout(inactivityTimer.current)
     inactivityTimer.current = setTimeout(() => {
-      lockApp()
+      lockAppRef.current()
     }, INACTIVITY_TIMEOUT_MS)
-  }, [isVerified])
+  }, [])
 
   // Track user activity
   useEffect(() => {
@@ -88,17 +105,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (inactivityTimer.current) clearTimeout(inactivityTimer.current)
     }
   }, [isVerified, resetInactivity])
-
-  const lockApp = useCallback(() => {
-    setIsVerified(false)
-    setIsLocked(true)
-    // Wipe crypto keys from memory
-    cryptoKeysRef.current = null
-    setCryptoKeysState(null)
-    document.body.style.filter      = ''
-    document.body.style.pointerEvents = ''
-    if (inactivityTimer.current) clearTimeout(inactivityTimer.current)
-  }, [])
 
   const setCryptoKeys = useCallback((keys: CryptoKeys) => {
     cryptoKeysRef.current = keys
@@ -133,11 +139,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   const removeAccount = useCallback(async (accountId: string) => {
-    // Wipe all local data for this account
-    await db.clips.where({ accountId }).delete()
-    await db.deviceSettings.where({ accountId }).delete()
-    await db.pendingClips.where({ accountId }).delete()
-    // Wipe TOTP secrets
+    await db.clips.where('accountId').equals(accountId).delete()
+    await db.deviceSettings.where('accountId').equals(accountId).delete()
+    await db.pendingClips.where('accountId').equals(accountId).delete()
     localStorage.removeItem(`clipord_totp_${accountId}`)
     localStorage.removeItem(`clipord_totp_enc_${accountId}`)
     localStorage.removeItem(`clipord_salt_${accountId}`)
@@ -162,6 +166,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setDeviceSettings(settings ?? null)
   }, [activeAccount])
 
+  // Persist device settings whenever verificationEnabled/method changes
+  const saveDeviceSettings = useCallback(async (patch: Partial<DeviceSettings>) => {
+    if (!activeAccount) return
+    const deviceId = getDeviceId()
+    const existing = await getDeviceSettings(activeAccount.id, deviceId)
+    const merged: DeviceSettings = {
+      accountId:           activeAccount.id,
+      deviceId,
+      verificationEnabled: true,
+      verificationMethod:  'totp',
+      cacheWipeAfterDays:  null,
+      lastActiveAt:        new Date().toISOString(),
+      ...existing,
+      ...patch,
+    }
+    await upsertDeviceSettings(merged)
+    setDeviceSettings(merged)
+  }, [activeAccount])
+
   return (
     <AuthContext.Provider value={{
       accounts,
@@ -179,6 +202,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       refreshSettings,
       lockApp,
       resetInactivity,
+      // @ts-expect-error — exposed for Settings page
+      saveDeviceSettings,
     }}>
       {children}
     </AuthContext.Provider>
@@ -189,4 +214,13 @@ export function useAuth(): AuthContextValue {
   const ctx = useContext(AuthContext)
   if (!ctx) throw new Error('useAuth must be used within AuthProvider')
   return ctx
+}
+
+// Extended hook for Settings page that also exposes saveDeviceSettings
+export function useAuthExtended(): AuthContextValue & {
+  saveDeviceSettings: (patch: Partial<DeviceSettings>) => Promise<void>
+} {
+  return useAuth() as AuthContextValue & {
+    saveDeviceSettings: (patch: Partial<DeviceSettings>) => Promise<void>
+  }
 }

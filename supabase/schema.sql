@@ -1,6 +1,15 @@
 -- Enable UUID extension
 create extension if not exists "uuid-ossp";
 
+-- Spaces table (must be created before clips)
+create table if not exists spaces (
+  id                    uuid primary key default uuid_generate_v4(),
+  name                  text not null,
+  creator_id            uuid not null references auth.users(id) on delete cascade,
+  allow_member_invite   boolean not null default false,
+  created_at            timestamptz not null default now()
+);
+
 -- Clips table
 create table if not exists clips (
   id                uuid primary key default uuid_generate_v4(),
@@ -15,15 +24,6 @@ create table if not exists clips (
   wipe_at           timestamptz,
   created_at        timestamptz not null default now(),
   updated_at        timestamptz not null default now()
-);
-
--- Spaces table
-create table if not exists spaces (
-  id                    uuid primary key default uuid_generate_v4(),
-  name                  text not null,
-  creator_id            uuid not null references auth.users(id) on delete cascade,
-  allow_member_invite   boolean not null default false,
-  created_at            timestamptz not null default now()
 );
 
 -- Space members table
@@ -55,13 +55,13 @@ alter table spaces        enable row level security;
 alter table space_members enable row level security;
 alter table space_invites enable row level security;
 
--- Clips: personal (user can only see their own personal clips)
+-- Clips: personal
 create policy "personal clips" on clips
   for all using (
     account_id = auth.uid() and space_id is null
   );
 
--- Clips: space clips (user must be a space member)
+-- Clips: space clips
 create policy "space clips" on clips
   for all using (
     space_id in (
@@ -75,22 +75,22 @@ create policy "space visibility" on spaces
     id in (select space_id from space_members where account_id = auth.uid())
   );
 
--- Space members: users can see their own memberships
+-- Space members: own memberships
 create policy "own memberships" on space_members
   for select using (account_id = auth.uid());
 
--- Space members: can see co-members in shared spaces
+-- Space members: co-member visibility
 create policy "co-member visibility" on space_members
   for select using (
     space_id in (select space_id from space_members where account_id = auth.uid())
   );
 
--- Space invites: creator can manage, members can insert if allowed
+-- Space invites: visibility
 create policy "invite visibility" on space_invites
   for select using (
     space_id in (select space_id from space_members where account_id = auth.uid())
   );
 
--- Enable realtime for clips
+-- Realtime
 alter publication supabase_realtime add table clips;
 alter publication supabase_realtime add table space_invites;

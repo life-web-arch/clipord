@@ -72,7 +72,7 @@ alter table space_members      enable row level security;
 alter table space_invites      enable row level security;
 alter table push_subscriptions enable row level security;
 
--- Clear any existing policies to ensure clean application
+-- Clear any existing policies to ensure clean application and fix infinite recursion loops
 drop policy if exists "personal clips" on clips;
 drop policy if exists "space clips" on clips;
 drop policy if exists "space visibility" on spaces;
@@ -88,76 +88,74 @@ drop policy if exists "invite update" on space_invites;
 drop policy if exists "own push subscription" on push_subscriptions;
 
 -- CLIPS
-create policy "personal clips" on clips
-  for all using (account_id = auth.uid() and space_id is null)
-  with check (account_id = auth.uid() and space_id is null);
+create policy "clips select" on clips
+  for select using (
+    account_id = auth.uid() OR
+    space_id in (select space_id from space_members where account_id = auth.uid())
+  );
 
-create policy "space clips" on clips
-  for all using (
-    space_id in (
-      select space_id from space_members where account_id = auth.uid()
-    )
-  )
-  with check (
-    account_id = auth.uid() and
-    space_id in (
-      select space_id from space_members where account_id = auth.uid()
-    )
+create policy "clips insert" on clips
+  for insert with check (
+    account_id = auth.uid() OR
+    space_id in (select space_id from space_members where account_id = auth.uid())
+  );
+
+create policy "clips update" on clips
+  for update using (
+    account_id = auth.uid() OR
+    space_id in (select space_id from space_members where account_id = auth.uid())
+  );
+
+create policy "clips delete" on clips
+  for delete using (
+    account_id = auth.uid() OR
+    space_id in (select space_id from space_members where account_id = auth.uid())
   );
 
 -- SPACES
--- Fix: Non-recursive visibility. A user can see a space if they are a member OR if an active invite exists.
-create policy "space visibility" on spaces
+create policy "spaces select" on spaces
   for select using (
-    exists (
-      select 1 from space_members sm
-      where sm.space_id = id and sm.account_id = auth.uid()
-    )
-    or
-    exists (
-      select 1 from space_invites si
-      where si.space_id = id and si.used_at is null
-    )
+    id in (select space_id from space_members where account_id = auth.uid()) OR
+    id in (select space_id from space_invites where used_at is null)
   );
 
-create policy "space insert" on spaces
+create policy "spaces insert" on spaces
   for insert with check (creator_id = auth.uid());
 
 -- SPACE MEMBERS
--- Fix: Prevent infinite recursion by ONLY allowing users to select their own membership rows
-create policy "own memberships" on space_members
+create policy "space_members select" on space_members
   for select using (account_id = auth.uid());
 
-create policy "member self insert" on space_members
+create policy "space_members insert" on space_members
   for insert with check (account_id = auth.uid());
 
-create policy "creator update members" on space_members
+create policy "space_members update" on space_members
   for update using (
-    exists (
-      select 1 from space_members sm
-      where sm.space_id = space_members.space_id
-      and sm.account_id = auth.uid()
-      and sm.role = 'creator'
-    )
+    space_id in (select id from spaces where creator_id = auth.uid())
+  );
+
+create policy "space_members delete" on space_members
+  for delete using (
+    account_id = auth.uid() OR
+    space_id in (select id from spaces where creator_id = auth.uid())
   );
 
 -- SPACE INVITES
-create policy "invite visibility" on space_invites
+create policy "invites select" on space_invites
   for select using (
-    space_id in (select space_id from space_members where account_id = auth.uid())
-    or used_at is null
+    space_id in (select space_id from space_members where account_id = auth.uid()) OR
+    used_at is null
   );
 
-create policy "invite insert" on space_invites
+create policy "invites insert" on space_invites
   for insert with check (created_by = auth.uid());
 
-create policy "invite update" on space_invites
+create policy "invites update" on space_invites
   for update using (auth.uid() is not null);
 
 -- PUSH SUBSCRIPTIONS
-create policy "own push subscription" on push_subscriptions
+create policy "push subscriptions all" on push_subscriptions
   for all using (account_id = auth.uid());
-
 
 -- ==========================================
 -- 3. REALTIME CONFIGURATION

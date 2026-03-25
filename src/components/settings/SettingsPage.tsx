@@ -66,6 +66,23 @@ export function SettingsPage({ onClose }: Props) {
     setSaving(false)
   }
 
+  const handleMethodChange = async (m: VerificationMethod) => {
+    if (!activeAccount) return
+    if (m === 'biometric' || m === 'both') {
+      const isReg = localStorage.getItem(`clipord_webauthn_${activeAccount.id}`)
+      if (!isReg) {
+        setSaving(true)
+        const ok = await registerBiometric(activeAccount.id, activeAccount.email)
+        setSaving(false)
+        if (!ok) {
+          flash('Biometric setup failed or cancelled.', false)
+          return
+        }
+      }
+    }
+    setVerificationMethod(m)
+  }
+
   const handleEnableBiometric = async () => {
     if (!activeAccount) return
     setSaving(true)
@@ -170,7 +187,7 @@ export function SettingsPage({ onClose }: Props) {
                         name="verificationMethod"
                         value={m}
                         checked={verificationMethod === m}
-                        onChange={() => setVerificationMethod(m)}
+                        onChange={() => handleMethodChange(m)}
                         className="accent-clipord-500"
                       />
                       <div>

@@ -16,7 +16,6 @@ import { ResetPassword } from './pages/ResetPassword'
 import {
   importVaultKey,
   storeTOTPSecret,
-  retrieveTOTPSecret,
 } from '@shared/crypto'
 import { supabase, checkVaultSetup, completeVaultSetup } from '@shared/supabase'
 import type { Account, CryptoKeys } from '@shared/types'
@@ -114,6 +113,7 @@ function AppInner() {
       if (!keyB64) throw new Error("Vault key missing from device")
       
       const accountKey = await importVaultKey(keyB64)
+      const { retrieveTOTPSecret } = await import('@shared/crypto')
       const secret = await retrieveTOTPSecret(account.id, accountKey)
       const { data } = await supabase.auth.getSession()
 
@@ -137,13 +137,24 @@ function AppInner() {
 
   const handleSelectAccount = async (account: Account) => {
     await setActiveAccount(account)
-    const hasTOTP = !!localStorage.getItem('clipord_totp_enc_' + account.id) || !!localStorage.getItem('clipord_totp_' + account.id)
+    
+    const vaultKeyB64 = localStorage.getItem('clipord_vault_key_' + account.id)
+    let hasTOTP = false
+
+    if (vaultKeyB64) {
+      try {
+        const { importVaultKey, retrieveTOTPSecret } = await import('@shared/crypto')
+        const key = await importVaultKey(vaultKeyB64)
+        const secret = await retrieveTOTPSecret(account.id, key)
+        hasTOTP = !!secret
+      } catch(e) {}
+    }
+
     if (!hasTOTP) {
       setStep('add-account-email')
       return
     }
 
-    // FIX: Fetch fresh device settings directly bypassing React's async setState delay
     const { getDeviceSettings } = await import('@shared/db')
     const { getDeviceId } = await import('@shared/platform')
     const freshSettings = await getDeviceSettings(account.id, getDeviceId())
@@ -175,7 +186,20 @@ function AppInner() {
 
   const handleVaultInputComplete = async (keyB64: string) => {
     localStorage.setItem('clipord_vault_key_' + pendingUserId, keyB64)
-    setStep('totp-setup')
+    
+    const account: Account = { id: pendingUserId, email: pendingEmail, createdAt: new Date().toISOString() }
+    addAccount(account)
+    await setActiveAccount(account)
+
+    const key = await importVaultKey(keyB64)
+    const { retrieveTOTPSecret } = await import('@shared/crypto')
+    const secret = await retrieveTOTPSecret(pendingUserId, key)
+
+    if (secret) {
+      setStep('totp-verify')
+    } else {
+      setStep('totp-setup')
+    }
   }
   
   const handleTOTPSetupComplete = async (secret: string) => {
@@ -183,13 +207,17 @@ function AppInner() {
         const account: Account = { id: pendingUserId, email: pendingEmail, createdAt: new Date().toISOString() }
         addAccount(account)
         await setActiveAccount(account)
-        const accountKey = await unlockAccount(account)
-        await storeTOTPSecret(account.id, secret, accountKey)
         
         const keyB64 = localStorage.getItem('clipord_vault_key_' + account.id)
-        const { data } = await supabase.auth.getSession()
-        if (keyB64 && data.session) bridgeAccountToExtension(account.id, account.email, secret, keyB64, data.session.access_token)
+        if (!keyB64) throw new Error("Vault key generation failure")
         
+        const accountKey = await importVaultKey(keyB64)
+        await storeTOTPSecret(account.id, secret, accountKey)
+        
+        const { data } = await supabase.auth.getSession()
+        if (data.session) bridgeAccountToExtension(account.id, account.email, secret, keyB64, data.session.access_token)
+        
+        await unlockAccount(account)
         setStep('app')
     } catch (error) {
         console.error("Failed during setup finalization:", error)

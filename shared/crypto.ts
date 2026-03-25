@@ -110,11 +110,21 @@ export async function storeTOTPSecret(
   accountKey: CryptoKey
 ): Promise<void> {
   const { ciphertext, iv } = await encryptText(secret, accountKey)
+  
   if (typeof localStorage !== 'undefined') {
     localStorage.setItem(
       'clipord_totp_enc_' + accountId,
       JSON.stringify({ ciphertext, iv, v: 2 })
     )
+  }
+
+  try {
+    const { supabase } = await import('./supabase')
+    await supabase.auth.updateUser({
+      data: { encrypted_totp_secret: ciphertext, totp_iv: iv }
+    })
+  } catch(e) {
+    console.warn('Could not sync TOTP secret to Supabase', e)
   }
 }
 
@@ -122,24 +132,47 @@ export async function retrieveTOTPSecret(
   accountId: string,
   accountKey: CryptoKey
 ): Promise<string | null> {
-  if (typeof localStorage === 'undefined') return null;
+  let ciphertext: string | undefined
+  let iv: string | undefined
 
-  const raw = localStorage.getItem('clipord_totp_enc_' + accountId)
-  if (!raw) {
-    const plaintext = localStorage.getItem('clipord_totp_' + accountId)
-    if (plaintext) {
-      await storeTOTPSecret(accountId, plaintext, accountKey)
-      localStorage.removeItem('clipord_totp_' + accountId)
-      return plaintext
-    }
-    return null
-  }
   try {
-    const parsed = JSON.parse(raw)
-    return await decryptText(parsed.ciphertext, parsed.iv, accountKey)
-  } catch (err) {
-    return null
+    const { supabase } = await import('./supabase')
+    const { data } = await supabase.auth.getUser()
+    ciphertext = data?.user?.user_metadata?.encrypted_totp_secret
+    iv = data?.user?.user_metadata?.totp_iv
+  } catch(e) {}
+
+  if (!ciphertext || !iv) {
+    if (typeof localStorage === 'undefined') return null;
+    const raw = localStorage.getItem('clipord_totp_enc_' + accountId)
+    
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      ciphertext = parsed.ciphertext
+      iv = parsed.iv
+    } else {
+      const plaintext = localStorage.getItem('clipord_totp_' + accountId)
+      if (plaintext) {
+        await storeTOTPSecret(accountId, plaintext, accountKey)
+        localStorage.removeItem('clipord_totp_' + accountId)
+        return plaintext
+      }
+      return null
+    }
   }
+
+  if (ciphertext && iv) {
+    try {
+      const secret = await decryptText(ciphertext, iv, accountKey)
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem('clipord_totp_enc_' + accountId, JSON.stringify({ ciphertext, iv, v: 2 }))
+      }
+      return secret
+    } catch (err) {
+      return null
+    }
+  }
+  return null
 }
 
 export function bufToBase64(buffer: ArrayBuffer | Uint8Array): string {

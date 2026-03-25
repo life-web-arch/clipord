@@ -143,12 +143,18 @@ function AppInner() {
       return
     }
 
-    if (deviceSettings?.verificationEnabled === false) {
+    // FIX: Fetch fresh device settings directly bypassing React's async setState delay
+    const { getDeviceSettings } = await import('@shared/db')
+    const { getDeviceId } = await import('@shared/platform')
+    const freshSettings = await getDeviceSettings(account.id, getDeviceId())
+
+    if (freshSettings?.verificationEnabled === false) {
       await unlockAccount(account)
       setStep('app')
       return
     }
-    const method = deviceSettings?.verificationMethod ?? 'totp'
+    
+    const method = freshSettings?.verificationMethod ?? 'totp'
     if (method === 'biometric' || method === 'both') setStep('biometric-verify')
     else setStep('totp-verify')
   }

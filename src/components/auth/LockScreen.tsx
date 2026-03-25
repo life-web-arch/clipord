@@ -1,22 +1,35 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { TOTPVerify } from './TOTPVerify'
 import { BiometricVerify } from './BiometricVerify'
 import { ForgotAccess } from './ForgotAccess'
 import { useAuth } from '../../context/AuthContext'
 import type { VerificationMethod } from '@shared/types'
+import { Spinner } from '../ui/Spinner'
 
 interface Props {
   onUnlocked: () => void
 }
 
 export function LockScreen({ onUnlocked }: Props) {
-  const { activeAccount, deviceSettings, setCryptoKeys, setVerified, saveDeviceSettings } = useAuth()
-  const[showForgot, setShowForgot]     = useState(false)
+  const { activeAccount, setCryptoKeys, setVerified, saveDeviceSettings } = useAuth()
+  const [showForgot, setShowForgot]     = useState(false)
   const [showFallback, setShowFallback] = useState(false)
+  
+  // Local state to ensure we get the immediate true setting from IndexedDB
+  const [method, setMethod] = useState<VerificationMethod | null>(null)
+
+  useEffect(() => {
+    if (!activeAccount) return
+    const fetchRealSetting = async () => {
+      const { getDeviceSettings } = await import('@shared/db')
+      const { getDeviceId } = await import('@shared/platform')
+      const settings = await getDeviceSettings(activeAccount.id, getDeviceId())
+      setMethod(settings?.verificationMethod ?? 'totp')
+    }
+    fetchRealSetting()
+  }, [activeAccount])
 
   if (!activeAccount) return null
-
-  const method: VerificationMethod = deviceSettings?.verificationMethod ?? 'totp'
 
   const handleVerified = async () => {
     try {
@@ -43,6 +56,11 @@ export function LockScreen({ onUnlocked }: Props) {
         console.error("Verification process failed:", error)
         setShowForgot(true)
     }
+  }
+
+  // Show a blank/loading screen for a split second while we fetch the exact device method
+  if (method === null) {
+    return <div className="min-h-screen bg-dark-0 flex items-center justify-center"><Spinner size="lg" /></div>
   }
 
   if (showForgot) {

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useBiometric } from '../../hooks/useBiometric'
 import { Spinner } from '../ui/Spinner'
 
@@ -13,10 +13,10 @@ interface Props {
 export function BiometricVerify({ accountId, email, onVerified, onFallback, onForgot }: Props) {
   const { verify } = useBiometric()
   const [loading, setLoading]   = useState(false)
-  const[error, setError]       = useState<string | null>(null)
+  const [error, setError]       = useState<string | null>(null)
   const [notRegistered, setNotRegistered] = useState(false)
 
-  const handleBiometric = async () => {
+  const handleBiometric = useCallback(async () => {
     setLoading(true)
     setError(null)
     
@@ -24,7 +24,6 @@ export function BiometricVerify({ accountId, email, onVerified, onFallback, onFo
     const isReg = localStorage.getItem(`clipord_webauthn_${accountId}`)
     if (!isReg) {
       setNotRegistered(true)
-      setError('Biometrics not set up on this device. Please use your authenticator code.')
       setLoading(false)
       return
     }
@@ -36,9 +35,11 @@ export function BiometricVerify({ accountId, email, onVerified, onFallback, onFo
       setError('Biometric verification failed. Please try again or use your code.')
     }
     setLoading(false)
-  }
+  }, [accountId, verify, onVerified])
 
-  useEffect(() => { handleBiometric() },[])
+  useEffect(() => { 
+    handleBiometric() 
+  }, [handleBiometric])
 
   return (
     <div className="min-h-screen bg-dark-0 flex flex-col items-center justify-center px-6 safe-top safe-bottom">
@@ -64,7 +65,11 @@ export function BiometricVerify({ accountId, email, onVerified, onFallback, onFo
           </div>
         )}
 
-        {!notRegistered && (
+        {notRegistered ? (
+          <p className="text-yellow-400/80 bg-yellow-500/10 border border-yellow-500/20 rounded-xl p-3 text-sm mb-6">
+            Biometrics are not set up on this specific device. Please use your authenticator code instead. You can re-enable biometrics in Settings later.
+          </p>
+        ) : (
           <p className="text-white/30 text-sm mb-6">
             Tap the icon to use Face ID / Fingerprint
           </p>

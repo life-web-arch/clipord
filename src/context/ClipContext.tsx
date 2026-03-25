@@ -61,8 +61,43 @@ export function ClipProvider({ children }: { children: React.ReactNode }) {
   const refreshClips = useCallback(async () => {
     if (!activeAccount) return
     setIsLoading(true)
-    const fetched = await getClipsForAccount(activeAccount.id, activeSpaceId)
-    setClips(fetched)
+
+    // 1. Initial quick load from local DB
+    const local = await getClipsForAccount(activeAccount.id, activeSpaceId)
+    setClips(local)
+
+    // 2. Fetch from cloud to populate local DB on fresh logins
+    if (navigator.onLine) {
+      try {
+        let query = supabase.from('clips').select('*').order('created_at', { ascending: false }).limit(500)
+        if (activeSpaceId) {
+          query = query.eq('space_id', activeSpaceId)
+        } else {
+          query = query.is('space_id', null)
+        }
+
+        const { data, error } = await query
+        if (data && !error) {
+          let hasChanges = false
+          for (const row of data) {
+            const clip = snakeToCamelClip(row)
+            const existing = local.find(c => c.id === clip.id)
+            if (!existing || existing.updatedAt !== clip.updatedAt) {
+              await upsertClip({ ...clip, synced: true })
+              hasChanges = true
+            }
+          }
+          
+          if (hasChanges) {
+            const finalLocal = await getClipsForAccount(activeAccount.id, activeSpaceId)
+            setClips(finalLocal)
+          }
+        }
+      } catch (err) {
+        console.error('Failed to fetch remote clips:', err)
+      }
+    }
+    
     setIsLoading(false)
   },[activeAccount, activeSpaceId])
 
@@ -104,17 +139,16 @@ export function ClipProvider({ children }: { children: React.ReactNode }) {
       activeSpaceId,
       async (row) => {
         const clip = snakeToCamelClip(row)
-        await upsertClip(clip)
+        await upsertClip({ ...clip, synced: true })
         setClips((prev) => {
           const exists = prev.find((c) => c.id === clip.id)
           if (!exists && !document.hasFocus()) {
-             // Dispatch generic system notification if not actively in the app
              if ('Notification' in window && Notification.permission === 'granted') {
                new Notification('New clip added', { body: clip.preview, icon: '/icons/icon-192.png' })
              }
           }
           if (exists) return prev.map((c) => c.id === clip.id ? clip : c)
-          return [clip, ...prev].sort((a, b) => {
+          return[clip, ...prev].sort((a, b) => {
             if (a.pinned && !b.pinned) return -1
             if (!a.pinned && b.pinned) return 1
             return b.createdAt.localeCompare(a.createdAt)
@@ -125,7 +159,7 @@ export function ClipProvider({ children }: { children: React.ReactNode }) {
       },
       async (row) => {
         const clip = snakeToCamelClip(row)
-        await upsertClip(clip)
+        await upsertClip({ ...clip, synced: true })
         setClips((prev) => prev.map((c) => c.id === clip.id ? clip : c))
       },
       async (clipId) => {
@@ -162,7 +196,7 @@ export function ClipProvider({ children }: { children: React.ReactNode }) {
     window.addEventListener('online', onOnline)
     if (navigator.onLine) processSyncQueue()
     return () => window.removeEventListener('online', onOnline)
-  }, [processSyncQueue])
+  },[processSyncQueue])
 
   useEffect(() => {
     const checkWipes = async () => {
@@ -256,7 +290,7 @@ export function ClipProvider({ children }: { children: React.ReactNode }) {
       createdAt: new Date().toISOString(),
     })
     processSyncQueue()
-  }, [processSyncQueue])
+  },[processSyncQueue])
 
   const setWipeTimer = useCallback(async (clipId: string, wipeAt: string | null) => {
     const clip = await db.clips.get(clipId)
@@ -271,7 +305,7 @@ export function ClipProvider({ children }: { children: React.ReactNode }) {
       createdAt: new Date().toISOString(),
     })
     processSyncQueue()
-  }, [processSyncQueue])
+  },[processSyncQueue])
 
   const decryptClip = useCallback(async (clip: Clip): Promise<string> => {
     if (!cryptoKeys) throw new Error('No crypto keys')
@@ -313,7 +347,7 @@ export function ClipProvider({ children }: { children: React.ReactNode }) {
       setSpaces((prev) => [...prev, space])
       setCryptoKeys({
         accountKey: cryptoKeys.accountKey,
-        spaceKeys:  { ...cryptoKeys.spaceKeys, [spaceId]: spaceKey },
+        spaceKeys:  { ...cryptoKeys.spaceKeys,[spaceId]: spaceKey },
       })
 
       return { error: null }

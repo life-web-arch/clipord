@@ -169,7 +169,8 @@ export async function retrieveTOTPSecret(
       }
       return secret
     } catch (err) {
-      return null
+      // Throw explicitly so the UI knows the Vault Key was wrong
+      throw new Error('DECRYPTION_FAILED')
     }
   }
   return null

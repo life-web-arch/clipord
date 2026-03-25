@@ -73,19 +73,20 @@ alter table space_invites      enable row level security;
 alter table push_subscriptions enable row level security;
 
 -- Clear any existing policies to ensure clean application and fix infinite recursion loops
-drop policy if exists "personal clips" on clips;
-drop policy if exists "space clips" on clips;
-drop policy if exists "space visibility" on spaces;
-drop policy if exists "space insert" on spaces;
-drop policy if exists "own memberships" on space_members;
-drop policy if exists "co-member visibility" on space_members;
-drop policy if exists "member visibility" on space_members;
-drop policy if exists "member self insert" on space_members;
-drop policy if exists "creator update members" on space_members;
-drop policy if exists "invite visibility" on space_invites;
-drop policy if exists "invite insert" on space_invites;
-drop policy if exists "invite update" on space_invites;
-drop policy if exists "own push subscription" on push_subscriptions;
+drop policy if exists "clips select" on clips;
+drop policy if exists "clips insert" on clips;
+drop policy if exists "clips update" on clips;
+drop policy if exists "clips delete" on clips;
+drop policy if exists "spaces select" on spaces;
+drop policy if exists "spaces insert" on spaces;
+drop policy if exists "space_members select" on space_members;
+drop policy if exists "space_members insert" on space_members;
+drop policy if exists "space_members update" on space_members;
+drop policy if exists "space_members delete" on space_members;
+drop policy if exists "invites select" on space_invites;
+drop policy if exists "invites insert" on space_invites;
+drop policy if exists "invites update" on space_invites;
+drop policy if exists "push subscriptions all" on push_subscriptions;
 
 -- CLIPS
 create policy "clips select" on clips
@@ -112,9 +113,10 @@ create policy "clips delete" on clips
     space_id in (select space_id from space_members where account_id = auth.uid())
   );
 
--- SPACES
+-- SPACES (Fixed: Creator can select space immediately upon insert)
 create policy "spaces select" on spaces
   for select using (
+    creator_id = auth.uid() OR
     id in (select space_id from space_members where account_id = auth.uid()) OR
     id in (select space_id from space_invites where used_at is null)
   );

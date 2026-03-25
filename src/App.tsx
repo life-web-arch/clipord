@@ -129,7 +129,7 @@ function AppInner() {
       return accountKey
     } catch (error) {
         console.error("FATAL: unlockAccount failed:", error)
-        setAuthError("Vault decryption failed. If you reset the app, you may need your recovery key.")
+        setAuthError("Vault decryption failed. Ensure your recovery key is correct.")
         setStep('error')
         throw error 
     }
@@ -185,20 +185,29 @@ function AppInner() {
   }
 
   const handleVaultInputComplete = async (keyB64: string) => {
-    localStorage.setItem('clipord_vault_key_' + pendingUserId, keyB64)
-    
-    const account: Account = { id: pendingUserId, email: pendingEmail, createdAt: new Date().toISOString() }
-    addAccount(account)
-    await setActiveAccount(account)
+    try {
+      const key = await importVaultKey(keyB64)
+      const { retrieveTOTPSecret } = await import('@shared/crypto')
+      
+      // If this throws, it means the key is completely wrong for this account's payload
+      const secret = await retrieveTOTPSecret(pendingUserId, key)
 
-    const key = await importVaultKey(keyB64)
-    const { retrieveTOTPSecret } = await import('@shared/crypto')
-    const secret = await retrieveTOTPSecret(pendingUserId, key)
+      localStorage.setItem('clipord_vault_key_' + pendingUserId, keyB64)
+      const account: Account = { id: pendingUserId, email: pendingEmail, createdAt: new Date().toISOString() }
+      addAccount(account)
+      await setActiveAccount(account)
 
-    if (secret) {
-      setStep('totp-verify')
-    } else {
-      setStep('totp-setup')
+      if (secret) {
+        setStep('totp-verify')
+      } else {
+        setStep('totp-setup')
+      }
+    } catch (e: any) {
+      if (e.message === 'DECRYPTION_FAILED') {
+        alert("Incorrect Recovery Key! This key does not match the data in the cloud.")
+      } else {
+        alert("Failed to process recovery key.")
+      }
     }
   }
   

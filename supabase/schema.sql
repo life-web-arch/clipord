@@ -1,6 +1,10 @@
 -- Enable UUID extension
 create extension if not exists "uuid-ossp";
 
+-- ==========================================
+-- 1. TABLE DEFINITIONS
+-- ==========================================
+
 -- Spaces table
 create table if not exists spaces (
   id                    uuid primary key default uuid_generate_v4(),
@@ -58,21 +62,36 @@ create table if not exists push_subscriptions (
   primary key (account_id)
 );
 
--- Row Level Security
+-- ==========================================
+-- 2. ROW LEVEL SECURITY (RLS) POLICIES
+-- ==========================================
+
 alter table clips              enable row level security;
 alter table spaces             enable row level security;
 alter table space_members      enable row level security;
 alter table space_invites      enable row level security;
 alter table push_subscriptions enable row level security;
 
--- Clips: personal
+-- Clear any existing policies to ensure clean application
 drop policy if exists "personal clips" on clips;
+drop policy if exists "space clips" on clips;
+drop policy if exists "space visibility" on spaces;
+drop policy if exists "space insert" on spaces;
+drop policy if exists "own memberships" on space_members;
+drop policy if exists "co-member visibility" on space_members;
+drop policy if exists "member visibility" on space_members;
+drop policy if exists "member self insert" on space_members;
+drop policy if exists "creator update members" on space_members;
+drop policy if exists "invite visibility" on space_invites;
+drop policy if exists "invite insert" on space_invites;
+drop policy if exists "invite update" on space_invites;
+drop policy if exists "own push subscription" on push_subscriptions;
+
+-- CLIPS
 create policy "personal clips" on clips
   for all using (account_id = auth.uid() and space_id is null)
   with check (account_id = auth.uid() and space_id is null);
 
--- Clips: space clips
-drop policy if exists "space clips" on clips;
 create policy "space clips" on clips
   for all using (
     space_id in (
@@ -86,69 +105,64 @@ create policy "space clips" on clips
     )
   );
 
--- Spaces: select
-drop policy if exists "space visibility" on spaces;
+-- SPACES
+-- Fix: Non-recursive visibility. A user can see a space if they are a member OR if an active invite exists.
 create policy "space visibility" on spaces
   for select using (
-    id in (select space_id from space_members where account_id = auth.uid())
-  );
-
--- Spaces: insert
-drop policy if exists "space insert" on spaces;
-create policy "space insert" on spaces
-  for insert with check (creator_id = auth.uid());
-
--- Space members: select own
-drop policy if exists "own memberships" on space_members;
-create policy "own memberships" on space_members
-  for select using (account_id = auth.uid());
-
--- Space members: select co-members
-drop policy if exists "co-member visibility" on space_members;
-create policy "co-member visibility" on space_members
-  for select using (
-    space_id in (select space_id from space_members where account_id = auth.uid())
-  );
-
--- Space members: insert self
-drop policy if exists "member self insert" on space_members;
-create policy "member self insert" on space_members
-  for insert with check (account_id = auth.uid());
-
--- Space members: creator update
-drop policy if exists "creator update members" on space_members;
-create policy "creator update members" on space_members
-  for update using (
-    space_id in (
-      select space_id from space_members
-      where account_id = auth.uid() and role = 'creator'
+    exists (
+      select 1 from space_members sm
+      where sm.space_id = id and sm.account_id = auth.uid()
+    )
+    or
+    exists (
+      select 1 from space_invites si
+      where si.space_id = id and si.used_at is null
     )
   );
 
--- Space invites: select
-drop policy if exists "invite visibility" on space_invites;
+create policy "space insert" on spaces
+  for insert with check (creator_id = auth.uid());
+
+-- SPACE MEMBERS
+-- Fix: Prevent infinite recursion by ONLY allowing users to select their own membership rows
+create policy "own memberships" on space_members
+  for select using (account_id = auth.uid());
+
+create policy "member self insert" on space_members
+  for insert with check (account_id = auth.uid());
+
+create policy "creator update members" on space_members
+  for update using (
+    exists (
+      select 1 from space_members sm
+      where sm.space_id = space_members.space_id
+      and sm.account_id = auth.uid()
+      and sm.role = 'creator'
+    )
+  );
+
+-- SPACE INVITES
 create policy "invite visibility" on space_invites
   for select using (
     space_id in (select space_id from space_members where account_id = auth.uid())
     or used_at is null
   );
 
--- Space invites: insert
-drop policy if exists "invite insert" on space_invites;
 create policy "invite insert" on space_invites
   for insert with check (created_by = auth.uid());
 
--- Space invites: update
-drop policy if exists "invite update" on space_invites;
 create policy "invite update" on space_invites
   for update using (auth.uid() is not null);
 
--- Push subscriptions: own
-drop policy if exists "own push subscription" on push_subscriptions;
+-- PUSH SUBSCRIPTIONS
 create policy "own push subscription" on push_subscriptions
   for all using (account_id = auth.uid());
 
--- Realtime Configuration
+
+-- ==========================================
+-- 3. REALTIME CONFIGURATION
+-- ==========================================
+
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN

@@ -129,7 +129,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     await db.deviceSettings.where({ accountId }).delete()
     localStorage.removeItem('clipord_totp_' + accountId)
     localStorage.removeItem('clipord_totp_enc_' + accountId)
-    localStorage.removeItem('clipord_salt_' + accountId)
+    localStorage.removeItem('clipord_vault_key_' + accountId)
     localStorage.removeItem('clipord_bf_' + accountId)
     localStorage.removeItem('clipord_webauthn_' + accountId)
     setAccounts((prev) => {
@@ -162,7 +162,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       accountId: targetId,
       deviceId,
       verificationEnabled: true,
-      verificationMethod: 'totp', // Default fallback, but will be overwritten by `...current`
+      verificationMethod: 'totp',
       cacheWipeAfterDays: null,
       lastActiveAt: new Date().toISOString(),
       ...current,
@@ -173,8 +173,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (targetId === activeAccountState?.id) {
       setDeviceSettings(next)
     }
-    // Note: Deliberately skipping syncing verificationMethod to Supabase user_metadata 
-    // to preserve device-specific hardware features (WebAuthn/Biometrics)
   },[activeAccountState])
 
   return (

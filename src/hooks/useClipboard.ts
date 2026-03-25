@@ -15,11 +15,11 @@ export function useClipboardDetector(enabled: boolean) {
 
   const readClipboard = useCallback(async () => {
     if (!supportsClipboardRead()) return
-
     try {
-      // Query permission safely before executing to avoid aggressive browser prompting loops
-      const permission = await navigator.permissions.query({ name: 'clipboard-read' as PermissionName })
-      if (permission.state === 'denied') return
+      try {
+        const permission = await navigator.permissions.query({ name: 'clipboard-read' as PermissionName })
+        if (permission.state === 'denied') return
+      } catch (err) { /* Firefox ignore */ }
 
       const content = await navigator.clipboard.readText()
       if (!content || content === lastContent) return
@@ -30,57 +30,41 @@ export function useClipboardDetector(enabled: boolean) {
         type:    detectClipType(content),
         preview: generatePreview(content, 60),
       })
-    } catch (err) {
-      // User denied clipboard permission or document is not focused — silent fail
-    }
+    } catch (err) {}
   }, [lastContent])
 
   useEffect(() => {
     if (!enabled) return
-
-    // iOS and desktop PWA: detect on focus
     const onFocus = () => { readClipboard() }
     window.addEventListener('focus', onFocus)
-    
-    // Also check immediately on mount
     readClipboard()
-
     return () => window.removeEventListener('focus', onFocus)
   },[enabled, readClipboard])
 
   const dismiss = useCallback(() => setDetected(null),[])
-
   return { detected, dismiss }
 }
 
 export function useCopyToClipboard() {
   const [copied, setCopied] = useState(false)
-
   const copy = useCallback(async (text: string) => {
     try {
       if (navigator.clipboard && navigator.clipboard.writeText) {
         await navigator.clipboard.writeText(text)
         setCopied(true)
         setTimeout(() => setCopied(false), 2000)
-      } else {
-        throw new Error('Clipboard API not available')
-      }
+      } else throw new Error('Clipboard API not available')
     } catch {
-      // Fallback for older browsers or non-secure contexts
       try {
         const el = document.createElement('textarea')
         el.value = text
-        
-        // Prevent scrolling to bottom of page in MS Edge
         el.setAttribute('readonly', '')
         el.style.position = 'absolute'
         el.style.left = '-9999px'
-        
         document.body.appendChild(el)
         el.select()
         document.execCommand('copy')
         document.body.removeChild(el)
-        
         setCopied(true)
         setTimeout(() => setCopied(false), 2000)
       } catch (fallbackErr) {
@@ -88,6 +72,5 @@ export function useCopyToClipboard() {
       }
     }
   },[])
-
   return { copy, copied }
 }

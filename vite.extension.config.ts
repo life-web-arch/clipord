@@ -7,8 +7,9 @@ export default defineConfig({
   plugins: [
     react(),
     viteStaticCopy({
-      targets: [
+      targets:[
         { src: 'extension/manifest.json', dest: '.' },
+        { src: 'extension/popup/popup.html', dest: '.' },
         { src: 'extension/icons/*',       dest: 'icons' },
         { src: 'public/icons/*',          dest: 'icons' },
       ],

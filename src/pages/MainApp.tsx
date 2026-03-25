@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { Header } from '../components/layout/Header'
 import { Sidebar } from '../components/layout/Sidebar'
 import { ClipList } from '../components/clips/ClipList'
@@ -16,7 +16,7 @@ export function MainApp() {
 
   useSync()
 
-  useState(() => {
+  useEffect(() => {
     const onOnline  = () => setIsOffline(false)
     const onOffline = () => setIsOffline(true)
     window.addEventListener('online',  onOnline)
@@ -25,26 +25,21 @@ export function MainApp() {
       window.removeEventListener('online',  onOnline)
       window.removeEventListener('offline', onOffline)
     }
-  })
+  },[])
 
   const handleSearchResults = useCallback((results: Clip[] | null) => {
     setSearchResults(results)
-  }, [])
+  },[])
 
   return (
     <div className="min-h-screen bg-dark-0">
       {isOffline && (
         <div className="fixed top-0 left-0 right-0 z-50 bg-yellow-500/20 border-b border-yellow-500/30 px-4 py-1.5 text-center">
-          <p className="text-yellow-300 text-xs font-medium">
-            Offline — changes will sync when connected
-          </p>
+          <p className="text-yellow-300 text-xs font-medium">Offline — changes will sync when connected</p>
         </div>
       )}
 
-      <Header
-        onMenuClick={() => setSidebarOpen(true)}
-        onSearchFocus={() => setSearchMode(true)}
-      />
+      <Header onMenuClick={() => setSidebarOpen(true)} onSearchFocus={() => setSearchMode(true)} />
       <Sidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} />
 
       <main className={`max-w-2xl mx-auto px-4 py-4 safe-bottom ${isOffline ? 'mt-7' : ''}`}>
@@ -52,10 +47,7 @@ export function MainApp() {
           <div className="mb-4 animate-slide-down">
             <SearchBar onResults={handleSearchResults} />
             {searchResults === null && (
-              <button
-                onClick={() => { setSearchMode(false); setSearchResults(null) }}
-                className="text-white/30 text-xs mt-2 hover:text-white/50"
-              >
+              <button onClick={() => { setSearchMode(false); setSearchResults(null) }} className="text-white/30 text-xs mt-2 hover:text-white/50">
                 Cancel search
               </button>
             )}

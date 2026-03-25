@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { TOTP, Secret } from 'otpauth'
 import { checkLockout, recordFailure, recordSuccess, formatLockoutTime } from '../../lib/bruteForce'
-import { retrieveTOTPSecret, deriveKeyFromPassphrase, base64ToBuf } from '@shared/crypto'
+import { retrieveTOTPSecret, importVaultKey } from '@shared/crypto'
 import { Spinner } from '../ui/Spinner'
 
 interface Props {
@@ -17,7 +17,7 @@ export function TOTPVerify({ accountId, email, cryptoKey, onVerified, onForgot }
   const [error, setError]           = useState<string | null>(null)
   const [loading, setLoading]       = useState(false)
   const[lockoutMs, setLockoutMs]   = useState(0)
-  const [attemptsLeft, setAttemptsLeft] = useState(5)
+  const[attemptsLeft, setAttemptsLeft] = useState(5)
 
   useEffect(() => {
     const { locked, remainingMs, attemptsLeft: left } = checkLockout(accountId)
@@ -33,11 +33,7 @@ export function TOTPVerify({ accountId, email, cryptoKey, onVerified, onForgot }
     const interval = setInterval(() => {
       setLockoutMs((prev) => {
         const next = prev - 1000
-        if (next <= 0) {
-          setError(null)
-          clearInterval(interval)
-          return 0
-        }
+        if (next <= 0) { setError(null); clearInterval(interval); return 0 }
         setError(`Too many failed attempts. Try again in ${formatLockoutTime(next)}.`)
         return next
       })
@@ -57,50 +53,36 @@ export function TOTPVerify({ accountId, email, cryptoKey, onVerified, onForgot }
       let secret: string | null = null
       let key = cryptoKey
       if (!key) {
-        const saltStr = localStorage.getItem('clipord_salt_' + accountId)
-        if (saltStr) {
-           key = await deriveKeyFromPassphrase(accountId, base64ToBuf(saltStr))
-        }
+        const b64 = localStorage.getItem('clipord_vault_key_' + accountId)
+        if (b64) key = await importVaultKey(b64)
       }
-      if (key) {
-        secret = await retrieveTOTPSecret(accountId, key)
-      }
+      if (key) secret = await retrieveTOTPSecret(accountId, key)
 
       if (!secret) {
-        setError('Authenticator not configured for this account')
+        setError('Authenticator not configured for this account / vault key missing.')
         setLoading(false)
         return
       }
 
       const totp = new TOTP({
-        issuer: 'Clipord', label: email, algorithm: 'SHA1',
-        digits: 6, period: 30,
+        issuer: 'Clipord', label: email, algorithm: 'SHA1', digits: 6, period: 30,
         secret: Secret.fromBase32(secret),
       })
 
-      const delta = totp.validate({ token: code, window: 1 })
-
-      if (delta === null) {
+      if (totp.validate({ token: code, window: 1 }) === null) {
         const result = recordFailure(accountId)
         if (result.locked) {
           setLockoutMs(result.remainingMs)
           setError(`Too many failed attempts. Locked for ${formatLockoutTime(result.remainingMs)}.`)
         } else {
           setAttemptsLeft(result.attemptsLeft)
-          setError(
-            result.attemptsLeft === 1
-              ? '⚠️ Incorrect code. 1 attempt remaining before lockout.'
-              : `Incorrect code. ${result.attemptsLeft} attempts remaining.`
-          )
+          setError(result.attemptsLeft === 1 ? '⚠️ Incorrect code. 1 attempt remaining before lockout.' : `Incorrect code. ${result.attemptsLeft} attempts remaining.`)
         }
       } else {
         recordSuccess(accountId)
         onVerified()
       }
-    } catch {
-      setError('Verification failed. Please try again.')
-    }
-
+    } catch { setError('Verification failed. Please try again.') }
     setLoading(false)
   }
 
@@ -118,55 +100,22 @@ export function TOTPVerify({ accountId, email, cryptoKey, onVerified, onForgot }
         </div>
 
         {error && (
-          <div className={`border rounded-xl px-4 py-3 mb-4 ${
-            isLocked
-              ? 'bg-red-500/20 border-red-500/50'
-              : 'bg-red-500/10 border-red-500/30'
-          }`}>
+          <div className={`border rounded-xl px-4 py-3 mb-4 ${isLocked ? 'bg-red-500/20 border-red-500/50' : 'bg-red-500/10 border-red-500/30'}`}>
             <p className="text-red-400 text-sm">{error}</p>
           </div>
         )}
 
         {!isLocked && (
           <>
-            <p className="text-white/40 text-sm mb-3 text-center">
-              Enter the code from your authenticator app
-            </p>
-            <input
-              type="text"
-              value={code}
-              onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-              onKeyDown={(e) => e.key === 'Enter' && handleVerify()}
-              placeholder="000000"
-              className="input-field mb-4 text-center text-2xl tracking-[0.5em] font-mono"
-              inputMode="numeric"
-              maxLength={6}
-              autoFocus
-              disabled={isLocked}
-              autoComplete="one-time-code"
-            />
-            <button
-              onClick={handleVerify}
-              disabled={loading || code.length < 6 || isLocked}
-              className="btn-primary w-full flex items-center justify-center gap-2 mb-4"
-            >
-              {loading ? <Spinner size="sm" /> : 'Verify'}
-            </button>
+            <p className="text-white/40 text-sm mb-3 text-center">Enter the code from your authenticator app</p>
+            <input type="text" value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))} onKeyDown={(e) => e.key === 'Enter' && handleVerify()} placeholder="000000" className="input-field mb-4 text-center text-2xl tracking-[0.5em] font-mono" inputMode="numeric" maxLength={6} autoFocus disabled={isLocked} autoComplete="one-time-code" />
+            <button onClick={handleVerify} disabled={loading || code.length < 6 || isLocked} className="btn-primary w-full flex items-center justify-center gap-2 mb-4">{loading ? <Spinner size="sm" /> : 'Verify'}</button>
           </>
         )}
 
-        {attemptsLeft < 5 && !isLocked && (
-          <p className="text-yellow-400/70 text-xs text-center mb-4">
-            ⚠️ {attemptsLeft} attempt{attemptsLeft !== 1 ? 's' : ''} remaining
-          </p>
-        )}
+        {attemptsLeft < 5 && !isLocked && <p className="text-yellow-400/70 text-xs text-center mb-4">⚠️ {attemptsLeft} attempt{attemptsLeft !== 1 ? 's' : ''} remaining</p>}
 
-        <button
-          onClick={onForgot}
-          className="w-full text-center text-white/30 text-sm hover:text-white/50 transition-colors py-2"
-        >
-          Can't get in?
-        </button>
+        <button onClick={onForgot} className="w-full text-center text-white/30 text-sm hover:text-white/50 transition-colors py-2">Can't get in?</button>
       </div>
     </div>
   )

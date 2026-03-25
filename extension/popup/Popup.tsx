@@ -1,22 +1,8 @@
 import { useState, useEffect, useCallback } from 'react'
-import { TOTP, Secret } from 'otpauth' // <-- CORRECT, NAMED IMPORT
-import {
-  isSessionValid,
-  setSession,
-  clearSession,
-  getRemainingMs,
-  isLockedOut,
-  recordFailedAttempt,
-  clearBruteForce,
-  refreshSession,
-} from '../lib/session'
-import {
-  getExtAccounts,
-} from '../lib/authBridge'
-import {
-  loadClipsEncrypted,
-  deleteClipEncrypted,
-} from '../lib/extensionCrypto'
+import { TOTP, Secret } from 'otpauth'
+import { isSessionValid, setSession, clearSession, getRemainingMs, isLockedOut, recordFailedAttempt, clearBruteForce, refreshSession } from '../lib/session'
+import { getExtAccounts } from '../lib/authBridge'
+import { loadClipsEncrypted, deleteClipRemote } from '../lib/extensionCrypto'
 import type { StoredClip } from '../lib/extensionCrypto'
 import type { ExtAccountRecord } from '@shared/types'
 import { detectClipType, getClipTypeIcon, generatePreview } from '@shared/detector'
@@ -25,23 +11,20 @@ type PopupStep = 'account-select' | 'verify' | 'clips'
 
 export function Popup() {
   const [step, setStep]                   = useState<PopupStep>('account-select')
-  const [accounts, setAccounts]           = useState<ExtAccountRecord[]>([])
+  const[accounts, setAccounts]           = useState<ExtAccountRecord[]>([])
   const[activeAccount, setActiveAccount] = useState<ExtAccountRecord | null>(null)
   const [clips, setClips]                 = useState<StoredClip[]>([])
   const [code, setCode]                   = useState('')
   const [error, setError]                 = useState<string | null>(null)
   const [loading, setLoading]             = useState(false)
   const [copied, setCopied]               = useState<string | null>(null)
-  const [remainingMs, setRemainingMs]     = useState(0)
+  const[remainingMs, setRemainingMs]     = useState(0)
   const [attemptsLeft, setAttemptsLeft]   = useState(5)
   const[lockoutMs, setLockoutMs]         = useState(0)
-  const [loadingAccounts, setLoadingAccounts] = useState(true)
+  const[loadingAccounts, setLoadingAccounts] = useState(true)
 
   useEffect(() => {
-    getExtAccounts().then((accs) => {
-      setAccounts(accs)
-      setLoadingAccounts(false)
-    })
+    getExtAccounts().then((accs) => { setAccounts(accs); setLoadingAccounts(false) })
   },[])
 
   useEffect(() => {
@@ -51,10 +34,7 @@ export function Popup() {
       setRemainingMs(remaining)
       if (remaining <= 0 && activeAccount) {
         const valid = await isSessionValid(activeAccount.id)
-        if (!valid) {
-          setStep('account-select')
-          setClips([])
-        }
+        if (!valid) { setStep('account-select'); setClips([]) }
       }
     }, 10_000)
     return () => clearInterval(interval)
@@ -71,7 +51,7 @@ export function Popup() {
       })
     }, 1000)
     return () => clearInterval(interval)
-  }, [lockoutMs])
+  },[lockoutMs])
 
   const handleSelectAccount = useCallback(async (account: ExtAccountRecord) => {
     setActiveAccount(account)
@@ -81,7 +61,7 @@ export function Popup() {
     const valid = await isSessionValid(account.id)
     if (valid) {
       const loaded = await loadClipsEncrypted(account.id)
-      setClips([...loaded].reverse())
+      setClips([...loaded])
       const remaining = await getRemainingMs()
       setRemainingMs(remaining)
       setStep('clips')
@@ -99,7 +79,6 @@ export function Popup() {
 
   const handleVerify = useCallback(async () => {
     if (!activeAccount || !code || code.length < 6) return
-
     const lockCheck = await isLockedOut(activeAccount.id)
     if (lockCheck.locked) return
 
@@ -110,19 +89,10 @@ export function Popup() {
       const secret = activeAccount.totpSecret
       if (!secret) {
         setError('Authenticator not configured. Sign in via the Clipord web app first.')
-        setLoading(false)
-        return
+        setLoading(false); return
       }
 
-      const totp = new TOTP({
-        issuer:    'Clipord',
-        label:     activeAccount.email,
-        algorithm: 'SHA1',
-        digits:    6,
-        period:    30,
-        secret:    Secret.fromBase32(secret), // <-- CORRECT USAGE
-      })
-
+      const totp = new TOTP({ issuer: 'Clipord', label: activeAccount.email, algorithm: 'SHA1', digits: 6, period: 30, secret: Secret.fromBase32(secret) })
       const delta = totp.validate({ token: code, window: 1 })
 
       if (delta === null) {
@@ -139,15 +109,12 @@ export function Popup() {
         await clearBruteForce(activeAccount.id)
         await setSession(activeAccount.id)
         const loaded = await loadClipsEncrypted(activeAccount.id)
-        setClips([...loaded].reverse())
+        setClips([...loaded])
         const remaining = await getRemainingMs()
         setRemainingMs(remaining)
         setStep('clips')
       }
-    } catch (e) {
-      setError('Verification error. Please try again.')
-    }
-
+    } catch (e) { setError('Verification error. Please try again.') }
     setCode('')
     setLoading(false)
   }, [activeAccount, code])
@@ -165,7 +132,7 @@ export function Popup() {
 
   const handleDelete = useCallback(async (id: string) => {
     if (!activeAccount) return
-    await deleteClipEncrypted(activeAccount.id, id)
+    await deleteClipRemote(activeAccount.id, id)
     setClips((prev) => prev.filter((c) => c.id !== id))
   }, [activeAccount])
 
@@ -179,7 +146,7 @@ export function Popup() {
   },[])
 
   const openApp = () => {
-    chrome.tabs.create({ url: 'https://clipord.vercel.app' })
+    chrome.tabs.create({ url: import.meta.env.VITE_APP_URL || 'https://clipord.app' })
   }
 
   const formatTime = (ms: number) => {
@@ -188,7 +155,6 @@ export function Popup() {
     return m + ':' + String(s).padStart(2, '0')
   }
 
-  // ... (The rest of the JSX is unchanged and correct)
   if (loadingAccounts) {
     return (
       <div className="w-72 bg-dark-0 text-white p-6 flex items-center justify-center">
@@ -201,42 +167,21 @@ export function Popup() {
     return (
       <div className="w-72 bg-dark-0 text-white font-sans" style={{ minHeight: '200px' }}>
         <div className="flex items-center justify-between px-4 py-3 border-b border-dark-200">
-          <div className="flex items-center gap-2">
-            <span>📋</span>
-            <span className="font-bold text-sm">Clipord</span>
-          </div>
-          <button onClick={openApp} className="text-xs text-clipord-400 hover:text-clipord-300">
-            Open app →
-          </button>
+          <div className="flex items-center gap-2"><span>📋</span><span className="font-bold text-sm">Clipord</span></div>
+          <button onClick={openApp} className="text-xs text-clipord-400 hover:text-clipord-300">Open app →</button>
         </div>
         <div className="p-3 space-y-2">
           {accounts.length === 0 ? (
             <div className="py-8 text-center">
               <p className="text-white/30 text-xs mb-3">No accounts found.</p>
               <p className="text-white/20 text-xs mb-4">Sign in via the Clipord web app first.</p>
-              <button
-                onClick={openApp}
-                className="bg-clipord-600 text-white text-sm px-4 py-2 rounded-xl hover:bg-clipord-500"
-              >
-                Open Clipord
-              </button>
+              <button onClick={openApp} className="bg-clipord-600 text-white text-sm px-4 py-2 rounded-xl hover:bg-clipord-500">Open Clipord</button>
             </div>
           ) : (
             accounts.map((acc) => (
-              <button
-                key={acc.id}
-                onClick={() => handleSelectAccount(acc)}
-                className="w-full flex items-center gap-3 p-3 rounded-xl bg-dark-100 hover:bg-dark-200 transition-colors text-left"
-              >
-                <div className="w-8 h-8 bg-clipord-600/30 rounded-xl flex items-center justify-center flex-shrink-0">
-                  <span className="text-clipord-400 font-semibold text-xs">
-                    {acc.email[0].toUpperCase()}
-                  </span>
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-white text-sm font-medium truncate">{acc.email}</p>
-                  <p className="text-white/30 text-xs">Tap to verify</p>
-                </div>
+              <button key={acc.id} onClick={() => handleSelectAccount(acc)} className="w-full flex items-center gap-3 p-3 rounded-xl bg-dark-100 hover:bg-dark-200 transition-colors text-left">
+                <div className="w-8 h-8 bg-clipord-600/30 rounded-xl flex items-center justify-center flex-shrink-0"><span className="text-clipord-400 font-semibold text-xs">{acc.email[0].toUpperCase()}</span></div>
+                <div className="flex-1 min-w-0"><p className="text-white text-sm font-medium truncate">{acc.email}</p><p className="text-white/30 text-xs">Tap to verify</p></div>
                 <span className="text-white/20">›</span>
               </button>
             ))
@@ -251,50 +196,17 @@ export function Popup() {
     return (
       <div className="w-72 bg-dark-0 text-white font-sans">
         <div className="flex items-center gap-2 px-4 py-3 border-b border-dark-200">
-          <button
-            onClick={() => { setStep('account-select'); setError(null); setActiveAccount(null) }}
-            className="text-white/40 hover:text-white/60 text-sm"
-          >
-            ←
-          </button>
+          <button onClick={() => { setStep('account-select'); setError(null); setActiveAccount(null) }} className="text-white/40 hover:text-white/60 text-sm">←</button>
           <span className="text-sm font-medium flex-1 truncate">{activeAccount.email}</span>
         </div>
         <div className="p-4">
-          <div className="text-center mb-4">
-            <div className="text-3xl mb-2">{locked ? '🔒' : '🔑'}</div>
-            <p className="text-white/40 text-xs">Enter authenticator code</p>
-          </div>
-          {error && (
-            <div className="bg-red-500/10 border border-red-500/30 rounded-xl px-3 py-2 mb-3">
-              <p className="text-red-400 text-xs">{error}</p>
-            </div>
-          )}
+          <div className="text-center mb-4"><div className="text-3xl mb-2">{locked ? '🔒' : '🔑'}</div><p className="text-white/40 text-xs">Enter authenticator code</p></div>
+          {error && <div className="bg-red-500/10 border border-red-500/30 rounded-xl px-3 py-2 mb-3"><p className="text-red-400 text-xs">{error}</p></div>}
           {!locked && (
             <>
-              <input
-                type="text"
-                value={code}
-                onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                onKeyDown={(e) => e.key === 'Enter' && handleVerify()}
-                placeholder="000000"
-                className="w-full bg-dark-100 border border-dark-300 rounded-xl px-4 py-3 text-white text-center text-xl tracking-[0.4em] font-mono focus:outline-none focus:border-clipord-500 mb-3"
-                inputMode="numeric"
-                maxLength={6}
-                autoFocus
-                autoComplete="one-time-code"
-              />
-              <button
-                onClick={handleVerify}
-                disabled={loading || code.length < 6}
-                className="w-full bg-clipord-600 hover:bg-clipord-500 disabled:opacity-50 text-white text-sm font-medium py-2.5 rounded-xl transition-colors"
-              >
-                {loading ? 'Verifying…' : 'Verify'}
-              </button>
-              {attemptsLeft < 5 && (
-                <p className="text-yellow-400/70 text-xs text-center mt-2">
-                  {attemptsLeft} attempt{attemptsLeft !== 1 ? 's' : ''} remaining
-                </p>
-              )}
+              <input type="text" value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))} onKeyDown={(e) => e.key === 'Enter' && handleVerify()} placeholder="000000" className="w-full bg-dark-100 border border-dark-300 rounded-xl px-4 py-3 text-white text-center text-xl tracking-[0.4em] font-mono focus:outline-none focus:border-clipord-500 mb-3" inputMode="numeric" maxLength={6} autoFocus autoComplete="one-time-code" />
+              <button onClick={handleVerify} disabled={loading || code.length < 6} className="w-full bg-clipord-600 hover:bg-clipord-500 disabled:opacity-50 text-white text-sm font-medium py-2.5 rounded-xl transition-colors">{loading ? 'Verifying…' : 'Verify'}</button>
+              {attemptsLeft < 5 && <p className="text-yellow-400/70 text-xs text-center mt-2">{attemptsLeft} attempt{attemptsLeft !== 1 ? 's' : ''} remaining</p>}
             </>
           )}
         </div>
@@ -306,23 +218,11 @@ export function Popup() {
     return (
       <div className="w-72 bg-dark-0 text-white font-sans">
         <div className="flex items-center justify-between px-4 py-3 border-b border-dark-200">
+          <div className="flex items-center gap-2"><span className="text-sm">📋</span><span className="font-bold text-sm">Clipord</span></div>
           <div className="flex items-center gap-2">
-            <span className="text-sm">📋</span>
-            <span className="font-bold text-sm">Clipord</span>
-          </div>
-          <div className="flex items-center gap-2">
-            {remainingMs > 0 && (
-              <span className="text-white/20 text-xs" title="Session expires in">{formatTime(remainingMs)}</span>
-            )}
-            <button
-              onClick={handleLock}
-              className="text-white/30 hover:text-white/60 text-xs px-2 py-1 rounded hover:bg-dark-200"
-            >
-              Lock
-            </button>
-            <button onClick={openApp} className="text-clipord-400 text-xs hover:text-clipord-300">
-              App →
-            </button>
+            {remainingMs > 0 && <span className="text-white/20 text-xs" title="Session expires in">{formatTime(remainingMs)}</span>}
+            <button onClick={handleLock} className="text-white/30 hover:text-white/60 text-xs px-2 py-1 rounded hover:bg-dark-200">Lock</button>
+            <button onClick={openApp} className="text-clipord-400 text-xs hover:text-clipord-300">App →</button>
           </div>
         </div>
 
@@ -330,8 +230,8 @@ export function Popup() {
           {clips.length === 0 ? (
             <div className="py-10 text-center">
               <div className="text-3xl mb-2">📋</div>
-              <p className="text-white/30 text-xs">No clips yet</p>
-              <p className="text-white/20 text-xs mt-1">Copy something and save it via the toast</p>
+              <p className="text-white/30 text-xs">No clips found</p>
+              <p className="text-white/20 text-xs mt-1">Or offline. Verify internet connection.</p>
             </div>
           ) : (
             <div className="p-2 space-y-2">
@@ -342,27 +242,11 @@ export function Popup() {
                   <div key={clip.id} className="bg-dark-100 rounded-xl p-3">
                     <div className="flex items-start gap-2 mb-2">
                       <span className="text-sm flex-shrink-0">{getClipTypeIcon(type)}</span>
-                      <p className="text-white/70 text-xs leading-relaxed flex-1 break-all"
-                         style={{ display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
-                        {preview}
-                      </p>
+                      <p className="text-white/70 text-xs leading-relaxed flex-1 break-all" style={{ display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{preview}</p>
                     </div>
                     <div className="flex gap-1.5">
-                      <button
-                        onClick={() => handleCopy(clip.content, clip.id)}
-                        className={'flex-1 py-1.5 rounded-lg text-xs font-medium transition-all ' +
-                          (copied === clip.id
-                            ? 'bg-green-500/20 text-green-400'
-                            : 'bg-clipord-600/20 text-clipord-400 hover:bg-clipord-600/30')}
-                      >
-                        {copied === clip.id ? '✓ Copied' : 'Copy'}
-                      </button>
-                      <button
-                        onClick={() => handleDelete(clip.id)}
-                        className="py-1.5 px-2 rounded-lg text-xs bg-dark-200 hover:bg-red-500/20 hover:text-red-400 transition-colors"
-                      >
-                        🗑
-                      </button>
+                      <button onClick={() => handleCopy(clip.content, clip.id)} className={'flex-1 py-1.5 rounded-lg text-xs font-medium transition-all ' + (copied === clip.id ? 'bg-green-500/20 text-green-400' : 'bg-clipord-600/20 text-clipord-400 hover:bg-clipord-600/30')}>{copied === clip.id ? '✓ Copied' : 'Copy'}</button>
+                      <button onClick={() => handleDelete(clip.id)} className="py-1.5 px-2 rounded-lg text-xs bg-dark-200 hover:bg-red-500/20 hover:text-red-400 transition-colors">🗑</button>
                     </div>
                   </div>
                 )
@@ -371,9 +255,7 @@ export function Popup() {
           )}
         </div>
 
-        <div className="px-3 py-2 border-t border-dark-200">
-          <p className="text-white/20 text-xs truncate">👤 {activeAccount.email}</p>
-        </div>
+        <div className="px-3 py-2 border-t border-dark-200"><p className="text-white/20 text-xs truncate">👤 {activeAccount.email}</p></div>
       </div>
     )
   }

@@ -11,7 +11,7 @@ interface Props {
 
 export function LockScreen({ onUnlocked }: Props) {
   const { activeAccount, deviceSettings, setCryptoKeys, setVerified, saveDeviceSettings } = useAuth()
-  const [showForgot, setShowForgot]     = useState(false)
+  const[showForgot, setShowForgot]     = useState(false)
   const [showFallback, setShowFallback] = useState(false)
 
   if (!activeAccount) return null
@@ -20,23 +20,19 @@ export function LockScreen({ onUnlocked }: Props) {
 
   const handleVerified = async () => {
     try {
-      const {
-        deriveKeyFromPassphrase, base64ToBuf, generateSalt, bufToBase64, retrieveTOTPSecret
-      } = await import('@shared/crypto')
+      const { importVaultKey, retrieveTOTPSecret } = await import('@shared/crypto')
       const { bridgeAccountToExtension } = await import('@/main')
+      const { supabase } = await import('@shared/supabase')
       
-      const saltKey = 'clipord_salt_' + activeAccount.id
-      let saltStr   = localStorage.getItem(saltKey)
-      if (!saltStr) {
-        saltStr = bufToBase64(generateSalt())
-        localStorage.setItem(saltKey, saltStr)
-      }
-      const salt       = base64ToBuf(saltStr)
-      const accountKey = await deriveKeyFromPassphrase(activeAccount.id, salt)
+      const b64 = localStorage.getItem('clipord_vault_key_' + activeAccount.id)
+      if (!b64) throw new Error("Vault Key missing locally")
+      const accountKey = await importVaultKey(b64)
       
       const secret = await retrieveTOTPSecret(activeAccount.id, accountKey)
-      if (secret) {
-        bridgeAccountToExtension(activeAccount.id, activeAccount.email, secret)
+      const { data } = await supabase.auth.getSession()
+
+      if (secret && data.session) {
+        bridgeAccountToExtension(activeAccount.id, activeAccount.email, secret, b64, data.session.access_token)
       }
 
       setCryptoKeys({ accountKey, spaceKeys: {} })
@@ -45,40 +41,17 @@ export function LockScreen({ onUnlocked }: Props) {
       onUnlocked()
     } catch (error) {
         console.error("Verification process failed:", error)
+        setShowForgot(true)
     }
   }
 
   if (showForgot) {
-    return (
-      <ForgotAccess
-        accountId={activeAccount.id}
-        email={activeAccount.email}
-        cryptoKey={null}
-        onRecovered={handleVerified}
-        onBack={() => setShowForgot(false)}
-      />
-    )
+    return <ForgotAccess accountId={activeAccount.id} email={activeAccount.email} cryptoKey={null} onRecovered={handleVerified} onBack={() => setShowForgot(false)} />
   }
 
   if ((method === 'biometric' || method === 'both') && !showFallback) {
-    return (
-      <BiometricVerify
-        accountId={activeAccount.id}
-        email={activeAccount.email}
-        onVerified={handleVerified}
-        onFallback={() => setShowFallback(true)}
-        onForgot={() => setShowForgot(true)}
-      />
-    )
+    return <BiometricVerify accountId={activeAccount.id} email={activeAccount.email} onVerified={handleVerified} onFallback={() => setShowFallback(true)} onForgot={() => setShowForgot(true)} />
   }
 
-  return (
-    <TOTPVerify
-      accountId={activeAccount.id}
-      email={activeAccount.email}
-      cryptoKey={null}
-      onVerified={handleVerified}
-      onForgot={() => setShowForgot(true)}
-    />
-  )
+  return <TOTPVerify accountId={activeAccount.id} email={activeAccount.email} cryptoKey={null} onVerified={handleVerified} onForgot={() => setShowForgot(true)} />
 }

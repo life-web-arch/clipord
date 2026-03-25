@@ -5,7 +5,6 @@ import App from './App'
 import ErrorBoundary from './ErrorBoundary'
 import './index.css'
 
-// ---- PWA Install prompt ----
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>
   userChoice: Promise<{ outcome: 'accepted' | 'dismissed' }>
@@ -26,23 +25,21 @@ window.addEventListener('appinstalled', () => {
   _installPrompt = null
 })
 
-// ---- Service worker ----
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker
-      .register('/sw.js')
-      .catch(console.error)
+    navigator.serviceWorker.register('/sw.js').catch(console.error)
   })
 }
 
-// ---- Extension auth bridge ----
 export function bridgeAccountToExtension(
   accountId: string,
   email: string,
-  totpSecret: string
+  totpSecret: string,
+  vaultKey: string,
+  accessToken: string
 ): void {
   window.dispatchEvent(new CustomEvent('clipord:sync-account', {
-    detail: { accountId, email, totpSecret }
+    detail: { accountId, email, totpSecret, vaultKey, accessToken }
   }))
 }
 

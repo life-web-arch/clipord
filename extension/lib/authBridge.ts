@@ -4,28 +4,26 @@ const EXT_ACCOUNTS_KEY = 'clipord_ext_accounts'
 const EXT_DEVICE_KEY   = 'clipord_ext_device_id'
 
 export interface ExtAccountRecord {
-  id:         string
-  email:      string
-  totpSecret: string
-  sbSession?: any
-  createdAt:  string
+  id:          string
+  email:       string
+  totpSecret:  string
+  vaultKey:    string
+  accessToken: string
+  createdAt:   string
 }
 
 export async function syncAccountToExtension(
   accountId: string,
   email: string,
   totpSecret: string,
-  sbSession?: any
+  vaultKey: string,
+  accessToken: string
 ): Promise<void> {
   const result   = await browser.storage.local.get(EXT_ACCOUNTS_KEY)
   const existing = (result[EXT_ACCOUNTS_KEY] as ExtAccountRecord[] | undefined) ??[]
   const filtered = existing.filter((a) => a.id !== accountId)
   const record: ExtAccountRecord = {
-    id:         accountId,
-    email,
-    totpSecret,
-    sbSession,
-    createdAt:  new Date().toISOString(),
+    id: accountId, email, totpSecret, vaultKey, accessToken, createdAt: new Date().toISOString(),
   }
   await browser.storage.local.set({ [EXT_ACCOUNTS_KEY]:[...filtered, record] })
 }

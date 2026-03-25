@@ -68,12 +68,19 @@ alter table push_subscriptions enable row level security;
 -- Clips: personal
 drop policy if exists "personal clips" on clips;
 create policy "personal clips" on clips
-  for all using (account_id = auth.uid() and space_id is null);
+  for all using (account_id = auth.uid() and space_id is null)
+  with check (account_id = auth.uid() and space_id is null);
 
 -- Clips: space clips
 drop policy if exists "space clips" on clips;
 create policy "space clips" on clips
   for all using (
+    space_id in (
+      select space_id from space_members where account_id = auth.uid()
+    )
+  )
+  with check (
+    account_id = auth.uid() and
     space_id in (
       select space_id from space_members where account_id = auth.uid()
     )

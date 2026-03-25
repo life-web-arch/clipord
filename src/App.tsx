@@ -4,6 +4,8 @@ import { AuthProvider, useAuth } from './context/AuthContext'
 import { ClipProvider, useClipsSafe } from './context/ClipContext'
 import { AccountSwitcher } from './components/auth/AccountSwitcher'
 import { EmailOTP } from './components/auth/EmailOTP'
+import { VaultSetup } from './components/auth/VaultSetup'
+import { VaultInput } from './components/auth/VaultInput'
 import { TOTPSetup } from './components/auth/TOTPSetup'
 import { TOTPVerify } from './components/auth/TOTPVerify'
 import { BiometricVerify } from './components/auth/BiometricVerify'
@@ -12,16 +14,11 @@ import { LockScreen } from './components/auth/LockScreen'
 import { MainApp } from './pages/MainApp'
 import { ResetPassword } from './pages/ResetPassword'
 import {
-  deriveKeyFromPassphrase,
+  importVaultKey,
   storeTOTPSecret,
   retrieveTOTPSecret,
-  getOrCreateSalt,
 } from '@shared/crypto'
-import {
-  supabase,
-  fetchSaltFromServer,
-  saveSaltToServer,
-} from '@shared/supabase'
+import { supabase, checkVaultSetup, completeVaultSetup } from '@shared/supabase'
 import type { Account, CryptoKeys } from '@shared/types'
 import { bridgeAccountToExtension } from '@/main'
 import { Spinner } from './components/ui/Spinner'
@@ -29,6 +26,8 @@ import { Spinner } from './components/ui/Spinner'
 type AuthStep =
   | 'switcher'
   | 'add-account-email'
+  | 'vault-setup'
+  | 'vault-input'
   | 'totp-setup'
   | 'totp-verify'
   | 'biometric-verify'
@@ -51,13 +50,10 @@ function IntentHandler() {
       const name = params.get('name')
       if (name && clipCtx?.createSpace) {
         handled.current = true
-        clipCtx.createSpace(decodeURIComponent(name)).then(() => {
-          navigate('/', { replace: true })
-        })
+        clipCtx.createSpace(decodeURIComponent(name)).then(() => navigate('/', { replace: true }))
       }
     }
   },[location, navigate, clipCtx])
-
   return null
 }
 
@@ -71,27 +67,13 @@ function InviteAccept() {
     if (!token) return
     const checkInvite = async () => {
       if (!isVerified || !activeAccount) return
-      
-      const { data, error } = await supabase
-        .from('space_invites')
-        .select('*, spaces(name)')
-        .eq('token', token)
-        .single()
-        
+      const { data, error } = await supabase.from('space_invites').select('*, spaces(name)').eq('token', token).single()
       if (error || !data) {
         alert('Invalid or expired invite')
         navigate('/', { replace: true })
         return
       }
-
-      const { error: joinError } = await supabase
-        .from('space_members')
-        .insert({
-          space_id: data.space_id,
-          account_id: activeAccount.id,
-          role: 'member'
-        })
-        
+      const { error: joinError } = await supabase.from('space_members').insert({ space_id: data.space_id, account_id: activeAccount.id, role: 'member' })
       if (!joinError) {
         await supabase.from('space_invites').update({ used_at: new Date().toISOString() }).eq('id', data.id)
         if (clipCtx?.refreshClips) await clipCtx.refreshClips()
@@ -115,54 +97,39 @@ function InviteAccept() {
 }
 
 function AppInner() {
-  const {
-    accounts, activeAccount, deviceSettings,
-    isVerified, isLocked,
-    setActiveAccount, setVerified, setCryptoKeys, addAccount, saveDeviceSettings
-  } = useAuth()
-
+  const { accounts, activeAccount, deviceSettings, isVerified, isLocked, setActiveAccount, setVerified, setCryptoKeys, addAccount, saveDeviceSettings } = useAuth()
   const[step, setStep]                   = useState<AuthStep>('switcher')
   const[authError, setAuthError]         = useState<string | null>(null)
   const[pendingEmail, setPendingEmail]   = useState('')
   const[pendingUserId, setPendingUserId] = useState('')
-  const [cryptoKeyRef, setCryptoKeyRef]   = useState<CryptoKey | null>(null)
+  const[cryptoKeyRef, setCryptoKeyRef]   = useState<CryptoKey | null>(null)
   const location                          = useLocation()
 
-  useEffect(() => {
-    if (isLocked && step === 'app') setStep('locked')
-  }, [isLocked, step])
-
-  useEffect(() => {
-    if (accounts.length === 0) setStep('switcher')
-  }, [accounts])
+  useEffect(() => { if (isLocked && step === 'app') setStep('locked') }, [isLocked, step])
+  useEffect(() => { if (accounts.length === 0) setStep('switcher') }, [accounts])
   
   const unlockAccount = async (account: Account): Promise<CryptoKey> => {
     try {
-      const salt = await getOrCreateSalt(
-        account.id,
-        fetchSaltFromServer,
-        saveSaltToServer
-      )
-      const accountKey = await deriveKeyFromPassphrase(account.id, salt)
+      const keyB64 = localStorage.getItem('clipord_vault_key_' + account.id)
+      if (!keyB64) throw new Error("Vault key missing from device")
       
+      const accountKey = await importVaultKey(keyB64)
       const secret = await retrieveTOTPSecret(account.id, accountKey)
-      if (secret) {
-        bridgeAccountToExtension(account.id, account.email, secret)
+      const { data } = await supabase.auth.getSession()
+
+      if (secret && data.session) {
+        bridgeAccountToExtension(account.id, account.email, secret, keyB64, data.session.access_token)
       }
 
       const keys: CryptoKeys = { accountKey, spaceKeys: {} }
       setCryptoKeys(keys)
       setCryptoKeyRef(accountKey)
       setVerified(true)
-      
-      await saveDeviceSettings({
-        lastActiveAt: new Date().toISOString()
-      }, account.id)
-      
+      await saveDeviceSettings({ lastActiveAt: new Date().toISOString() }, account.id)
       return accountKey
     } catch (error) {
         console.error("FATAL: unlockAccount failed:", error)
-        setAuthError("A critical error occurred during account decryption. Please try again.")
+        setAuthError("Vault decryption failed. If you reset the app, you may need your recovery key.")
         setStep('error')
         throw error 
     }
@@ -170,9 +137,7 @@ function AppInner() {
 
   const handleSelectAccount = async (account: Account) => {
     await setActiveAccount(account)
-    const hasTOTP =
-      !!localStorage.getItem('clipord_totp_enc_' + account.id) ||
-      !!localStorage.getItem('clipord_totp_' + account.id)
+    const hasTOTP = !!localStorage.getItem('clipord_totp_enc_' + account.id) || !!localStorage.getItem('clipord_totp_' + account.id)
     if (!hasTOTP) {
       setStep('add-account-email')
       return
@@ -184,56 +149,53 @@ function AppInner() {
       return
     }
     const method = deviceSettings?.verificationMethod ?? 'totp'
-    if (method === 'biometric' || method === 'both') {
-      setStep('biometric-verify')
-    } else {
-      setStep('totp-verify')
-    }
+    if (method === 'biometric' || method === 'both') setStep('biometric-verify')
+    else setStep('totp-verify')
   }
 
   const handleEmailVerified = async (email: string, userId: string) => {
     setPendingEmail(email)
     setPendingUserId(userId)
+    const isSetupComplete = await checkVaultSetup()
+    if (!isSetupComplete) setStep('vault-setup')
+    else setStep('vault-input')
+  }
+
+  const handleVaultSetupComplete = async (keyB64: string) => {
+    localStorage.setItem('clipord_vault_key_' + pendingUserId, keyB64)
+    await completeVaultSetup()
+    setStep('totp-setup')
+  }
+
+  const handleVaultInputComplete = async (keyB64: string) => {
+    localStorage.setItem('clipord_vault_key_' + pendingUserId, keyB64)
     setStep('totp-setup')
   }
   
   const handleTOTPSetupComplete = async (secret: string) => {
     try {
-        const account: Account = {
-            id: pendingUserId, email: pendingEmail, createdAt: new Date().toISOString(),
-        }
-        
+        const account: Account = { id: pendingUserId, email: pendingEmail, createdAt: new Date().toISOString() }
         addAccount(account)
         await setActiveAccount(account)
         const accountKey = await unlockAccount(account)
-        
-        // Securely encrypt and store the newly created key right away
         await storeTOTPSecret(account.id, secret, accountKey)
-        bridgeAccountToExtension(account.id, account.email, secret)
+        
+        const keyB64 = localStorage.getItem('clipord_vault_key_' + account.id)
+        const { data } = await supabase.auth.getSession()
+        if (keyB64 && data.session) bridgeAccountToExtension(account.id, account.email, secret, keyB64, data.session.access_token)
         
         setStep('app')
     } catch (error) {
-        console.error("Failed during TOTP setup finalization:", error)
-        setAuthError("Failed to save your security keys after setup. Please try adding the account again.")
+        console.error("Failed during setup finalization:", error)
+        setAuthError("Failed to save your security keys after setup.")
         setStep('error')
     }
   }
 
-  const handleTOTPVerified = async () => {
-    if (!activeAccount) return
-    await unlockAccount(activeAccount)
-    setStep('app')
-  }
+  const handleTOTPVerified = async () => { if (!activeAccount) return; await unlockAccount(activeAccount); setStep('app') }
+  const handleBiometricVerified = async () => { if (!activeAccount) return; await unlockAccount(activeAccount); setStep('app') }
 
-  const handleBiometricVerified = async () => {
-    if (!activeAccount) return
-    await unlockAccount(activeAccount)
-    setStep('app')
-  }
-
-  if (location.pathname === '/reset-password') {
-    return <ResetPassword />
-  }
+  if (location.pathname === '/reset-password') return <ResetPassword />
 
   if (step === 'error') {
     return (
@@ -248,18 +210,8 @@ function AppInner() {
     )
   }
   
-  if (useAuth().isLoading) {
-      return (
-        <div className="min-h-screen bg-dark-0 flex items-center justify-center">
-            <Spinner size="lg" />
-        </div>
-      )
-  }
-
-  if (step === 'locked') {
-    return <LockScreen onUnlocked={() => setStep('app')} />
-  }
-
+  if (useAuth().isLoading) return <div className="min-h-screen bg-dark-0 flex items-center justify-center"><Spinner size="lg" /></div>
+  if (step === 'locked') return <LockScreen onUnlocked={() => setStep('app')} />
   if (step === 'app' && isVerified) {
     return (
       <ClipProvider>
@@ -273,66 +225,15 @@ function AppInner() {
     )
   }
 
-  if (step === 'switcher') {
-    return (
-      <AccountSwitcher
-        onSelectAccount={handleSelectAccount}
-        onAddAccount={() => setStep('add-account-email')}
-      />
-    )
-  }
-
-  if (step === 'add-account-email') {
-    return <EmailOTP onVerified={handleEmailVerified} onBack={() => setStep('switcher')} />
-  }
-
-  if (step === 'totp-setup' && pendingEmail && pendingUserId) {
-    return (
-      <TOTPSetup
-        email={pendingEmail}
-        accountId={pendingUserId}
-        onComplete={handleTOTPSetupComplete}
-      />
-    )
-  }
-
-  if (step === 'totp-verify' && activeAccount) {
-    return (
-      <TOTPVerify
-        accountId={activeAccount.id}
-        email={activeAccount.email}
-        cryptoKey={cryptoKeyRef}
-        onVerified={handleTOTPVerified}
-        onForgot={() => setStep('forgot')}
-      />
-    )
-  }
-
-  if (step === 'biometric-verify' && activeAccount) {
-    return (
-      <BiometricVerify
-        accountId={activeAccount.id}
-        email={activeAccount.email}
-        onVerified={handleBiometricVerified}
-        onFallback={() => setStep('totp-verify')}
-        onForgot={() => setStep('forgot')}
-      />
-    )
-  }
-
-  if (step === 'forgot' && activeAccount) {
-    return (
-      <ForgotAccess
-        accountId={activeAccount.id}
-        email={activeAccount.email}
-        cryptoKey={cryptoKeyRef}
-        onRecovered={handleTOTPVerified}
-        onBack={() => setStep(
-          deviceSettings?.verificationMethod === 'biometric' ? 'biometric-verify' : 'totp-verify'
-        )}
-      />
-    )
-  }
+  if (step === 'switcher') return <AccountSwitcher onSelectAccount={handleSelectAccount} onAddAccount={() => setStep('add-account-email')} />
+  if (step === 'add-account-email') return <EmailOTP onVerified={handleEmailVerified} onBack={() => setStep('switcher')} />
+  if (step === 'vault-setup') return <VaultSetup onComplete={handleVaultSetupComplete} />
+  if (step === 'vault-input') return <VaultInput onComplete={handleVaultInputComplete} onBack={() => setStep('switcher')} />
+  
+  if (step === 'totp-setup' && pendingEmail && pendingUserId) return <TOTPSetup email={pendingEmail} accountId={pendingUserId} onComplete={handleTOTPSetupComplete} />
+  if (step === 'totp-verify' && activeAccount) return <TOTPVerify accountId={activeAccount.id} email={activeAccount.email} cryptoKey={cryptoKeyRef} onVerified={handleTOTPVerified} onForgot={() => setStep('forgot')} />
+  if (step === 'biometric-verify' && activeAccount) return <BiometricVerify accountId={activeAccount.id} email={activeAccount.email} onVerified={handleBiometricVerified} onFallback={() => setStep('totp-verify')} onForgot={() => setStep('forgot')} />
+  if (step === 'forgot' && activeAccount) return <ForgotAccess accountId={activeAccount.id} email={activeAccount.email} cryptoKey={cryptoKeyRef} onRecovered={handleTOTPVerified} onBack={() => setStep(deviceSettings?.verificationMethod === 'biometric' ? 'biometric-verify' : 'totp-verify')} />
 
   return null
 }

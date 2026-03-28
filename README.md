@@ -1,5 +1,6 @@
 
 
+
 # Clipord
 
 Secure, encrypted, cross-device clipboard manager.
